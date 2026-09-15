@@ -83,7 +83,7 @@ fn boundary_ok(rest: &str) -> bool {
 }
 
 /// 在单行文本上应用所有映射。`line` 是整行 JSON 文本。
-pub fn apply_line(line: &str, rules: &[CompiledRewrite]) -> String {
+fn apply_line(line: &str, rules: &[CompiledRewrite]) -> String {
     if rules.is_empty() {
         return line.to_string();
     }

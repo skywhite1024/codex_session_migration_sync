@@ -80,7 +80,7 @@ pub fn append_session_index(
 mod tests {
     use super::*;
 
-    fn temp_home(tag: &str) -> PathBuf {
+    fn temp_home(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("codexrelay-si-{}-{}", tag, uuid::Uuid::now_v7()))
     }
 
@@ -109,11 +109,8 @@ mod tests {
 
         // 已存在的 id 不新增行。
         assert!(!append_session_index(&home, "existing", "x").unwrap());
-        let lines: Vec<&str> = fs::read_to_string(&idx)
-            .unwrap()
-            .trim_end()
-            .split('\n')
-            .collect();
+        let text = fs::read_to_string(&idx).unwrap();
+        let lines: Vec<&str> = text.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 2);
 
         let _ = fs::remove_dir_all(&home);

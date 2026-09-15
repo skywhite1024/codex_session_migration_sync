@@ -2166,6 +2166,7 @@ mod tests {
                 name: "import".to_string(),
                 note: None,
                 strategy: ConflictStrategy::Overwrite,
+                path_rewrites: None,
             },
         )
         .unwrap();
@@ -2226,6 +2227,7 @@ mod tests {
                 name: "import".to_string(),
                 note: None,
                 strategy: ConflictStrategy::Recommended,
+                path_rewrites: None,
             },
         )
         .unwrap();
@@ -2292,6 +2294,7 @@ mod tests {
                 name: "import".to_string(),
                 note: None,
                 strategy: ConflictStrategy::Overwrite,
+                path_rewrites: None,
             },
         )
         .unwrap();
