@@ -5,7 +5,7 @@ const DEMO_SESSION_B = "019d0000-2222-7777-8888-000000000002";
 const DEMO_SESSION_C = "019d0000-3333-7777-8888-000000000003";
 
 export const WEB_DEMO_STATUS: AppStatus = {
-  product_name: "CodexRelay（网页预览）",
+  product_name: "codex_session_migration_sync（网页预览）",
   version: "0.1.0",
   codex_home: {
     detected_home: "(网页预览模式)",

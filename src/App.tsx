@@ -1558,7 +1558,7 @@ function App() {
     <main className="container">
       <header className="header">
         <div>
-          <h1>CodexRelay</h1>
+          <h1>codex_session_migration_sync</h1>
           <div className="muted">
             {status ? (
               <>

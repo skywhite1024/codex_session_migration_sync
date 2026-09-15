@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CodexRelay",
+  "productName": "codex_session_migration_sync",
   "version": "0.1.7",
-  "identifier": "com.codexrelay.desktop",
+  "identifier": "com.codexsessionmigrationsync.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev:tauri",
     "devUrl": "http://localhost:5273",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "CodexRelay",
+        "title": "codex_session_migration_sync",
         "width": 1100,
         "height": 720
       }
