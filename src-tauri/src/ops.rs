@@ -13,7 +13,8 @@ use crate::{
     },
     codex, db, device,
     errors::{AppError, AppResult},
-    hash, settings,
+    hash, path_rewrite::{self, PathRewrite},
+    settings,
     transfers::TransferRecord,
     vault,
 };
@@ -147,6 +148,9 @@ pub struct ImportParams {
     pub name: String,
     pub note: Option<String>,
     pub strategy: ConflictStrategy,
+    /// 可选的旧路径→新路径前缀映射（跨设备导入时重绑 cwd）。
+    #[serde(default)]
+    pub path_rewrites: Option<Vec<PathRewrite>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +177,9 @@ pub struct ImportBundlesParams {
     pub name: String,
     pub note: Option<String>,
     pub strategy: ConflictStrategy,
+    /// 批量导入时统一应用的路径重绑规则。
+    #[serde(default)]
+    pub path_rewrites: Option<Vec<PathRewrite>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -901,6 +908,7 @@ pub fn import_bundle<R: tauri::Runtime>(
         let local_written_path: Option<PathBuf>;
         let mut vault_rollout_rel = "rollout.jsonl".to_string();
 
+        let rewrites: Vec<PathRewrite> = params.path_rewrites.clone().unwrap_or_default();
         let strategy = match params.strategy {
             ConflictStrategy::Recommended => {
                 if has_conflict {
@@ -977,18 +985,32 @@ pub fn import_bundle<R: tauri::Runtime>(
                         fs::create_dir_all(parent)
                             .map_err(|e| format!("create sessions dir: {e}"))?;
                     }
-                    vault::copy_file(&extracted.rollout.path, &target)?;
+                    if rewrites.is_empty() {
+                        vault::copy_file(&extracted.rollout.path, &target)?;
+                    } else {
+                        // 跨设备导入：先在 vault 中转一份做路径重绑，再落到 CODEX_HOME。
+                        let rewritten_tmp = transfer_dir.join("rollout_rewritten.jsonl");
+                        path_rewrite::rewrite_rollout(
+                            &extracted.rollout.path,
+                            &rewritten_tmp,
+                            None,
+                            &manifest.session_id,
+                            &rewrites,
+                        )?;
+                        vault::copy_file(&rewritten_tmp, &target)?;
+                    }
                 }
                 local_written_path = Some(target);
             }
             ConflictStrategy::ImportAsNew => {
                 let new_id = uuid::Uuid::now_v7().to_string();
                 let rewritten = transfer_dir.join("rollout_effective.jsonl");
-                rewrite_session_id(
+                path_rewrite::rewrite_rollout(
                     &extracted.rollout.path,
-                    &manifest.session_id,
-                    &new_id,
                     &rewritten,
+                    Some(&new_id),
+                    &manifest.session_id,
+                    &rewrites,
                 )?;
                 vault_rollout_rel = "rollout_effective.jsonl".to_string();
 
@@ -1138,6 +1160,7 @@ pub fn import_bundles<R: tauri::Runtime>(
                         name: derived_name,
                         note: params.note.clone(),
                         strategy: params.strategy.clone(),
+                        path_rewrites: params.path_rewrites.clone(),
                     },
                 ) {
                     Ok(r) => out_items.push(ImportBundlesItem {
@@ -1198,6 +1221,7 @@ pub fn import_bundles<R: tauri::Runtime>(
                             name: derived_name,
                             note: params.note.clone(),
                             strategy: params.strategy.clone(),
+                            path_rewrites: params.path_rewrites.clone(),
                         },
                     ) {
                         Ok(r) => out_items.push(ImportBundlesItem {

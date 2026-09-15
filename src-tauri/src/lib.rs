@@ -7,6 +7,7 @@ mod errors;
 mod hash;
 mod id_extract;
 mod ops;
+mod path_rewrite;
 mod preview;
 mod settings;
 mod transfers;

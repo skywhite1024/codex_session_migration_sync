@@ -169,11 +169,20 @@ export type ConflictStrategy =
   | "import_as_new"
   | "cancel";
 
+export type PathRewrite = {
+  /** A 机上的旧绝对路径前缀 */
+  from: string;
+  /** B 机上的新绝对路径前缀 */
+  to: string;
+};
+
 export type ImportParams = {
   bundle_path: string;
   name: string;
   note?: string | null;
   strategy: ConflictStrategy;
+  /** 跨设备导入时把旧路径前缀重绑为 B 机路径（重绑 cwd） */
+  path_rewrites?: PathRewrite[] | null;
 };
 
 export type ImportResult = {
@@ -190,6 +199,8 @@ export type ImportBundlesParams = {
   name: string;
   note?: string | null;
   strategy: ConflictStrategy;
+  /** 批量导入时统一应用的路径重绑规则 */
+  path_rewrites?: PathRewrite[] | null;
 };
 
 export type ImportBundlesItem = {
