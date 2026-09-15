@@ -26,6 +26,7 @@ import type {
   ImportBundlesResult,
   InspectBundleResult,
   InspectBatchZipResult,
+  PathRewrite,
   RolloutPreview,
   SessionSummary,
   TransferRecord,
@@ -360,6 +361,8 @@ function App() {
   const [importNote, setImportNote] = useState("");
   const [importStrategy, setImportStrategy] =
     useState<ConflictStrategy>("overwrite");
+  const [importPathRewrites, setImportPathRewrites] =
+    useState<PathRewrite[]>([]);
   const [importBatchResult, setImportBatchResult] =
     useState<ImportBundlesResult | null>(null);
   const [bundlePreview, setBundlePreview] = useState<RolloutPreview | null>(
@@ -1161,6 +1164,32 @@ function App() {
     }
   }
 
+  function addPathRewrite() {
+    setImportPathRewrites((arr) => [...arr, { from: "", to: "" }]);
+  }
+  function updatePathRewrite(i: number, key: "from" | "to", v: string) {
+    setImportPathRewrites((arr) =>
+      arr.map((rw, idx) => (idx === i ? { ...rw, [key]: v } : rw)),
+    );
+  }
+  function removePathRewrite(i: number) {
+    setImportPathRewrites((arr) => arr.filter((_, idx) => idx !== i));
+  }
+  async function pickRewriteTarget(i: number) {
+    if (!isTauri) {
+      setError("网页预览模式不支持选择文件夹，请在桌面版（Tauri）中使用。");
+      return;
+    }
+    const selected = await open({
+      title: "选择 B 机上的项目文件夹",
+      directory: true,
+      multiple: false,
+    });
+    const picked = Array.isArray(selected) ? selected[0] : selected;
+    if (!picked) return;
+    updatePathRewrite(i, "to", picked);
+  }
+
   async function handleImport() {
     setError(null);
     setImportBatchResult(null);
@@ -1178,11 +1207,15 @@ function App() {
         setError("名称为必填项。");
         return;
       }
+      const activeRewrites = importPathRewrites
+        .filter((rw) => rw.from.trim() && rw.to.trim())
+        .map((rw) => ({ from: rw.from.trim(), to: rw.to.trim() }));
       const r = await api.importBundles({
         bundle_paths: importBundlePaths,
         name: importName.trim(),
         note: importNote.trim() ? importNote.trim() : null,
         strategy: importStrategy,
+        path_rewrites: activeRewrites.length ? activeRewrites : null,
       });
       setImportBatchResult(r);
       await refreshStatusAndSessions();
@@ -2847,6 +2880,55 @@ function App() {
 	                    </div>
 	                  </label>
 	                )}
+	                <div className="field">
+	                  <div className="label">路径重绑（跨设备可选）</div>
+	                  <div className="hint muted small">
+	                    两台机器项目路径不一致时，把 A 机旧路径前缀替换为 B 机新路径。
+	                    留空则不改动。
+	                  </div>
+	                  {importPathRewrites.map((rw, i) => (
+	                    <div
+	                      key={i}
+	                      style={{
+	                        display: "flex",
+	                        gap: 6,
+	                        marginTop: 6,
+	                        flexWrap: "wrap",
+	                        alignItems: "center",
+	                      }}
+	                    >
+	                      <input
+	                        style={{ flex: "1 1 200px" }}
+	                        placeholder="A 机旧路径，如 C:\Users\alex\proj"
+	                        value={rw.from}
+	                        onChange={(e) => updatePathRewrite(i, "from", e.target.value)}
+	                      />
+	                      <span className="muted">→</span>
+	                      <input
+	                        style={{ flex: "1 1 200px" }}
+	                        placeholder="B 机新路径"
+	                        value={rw.to}
+	                        onChange={(e) => updatePathRewrite(i, "to", e.target.value)}
+	                      />
+	                      <button
+	                        type="button"
+	                        onClick={() => pickRewriteTarget(i)}
+	                      >
+	                        选文件夹
+	                      </button>
+	                      <button type="button" onClick={() => removePathRewrite(i)}>
+	                        删除
+	                      </button>
+	                    </div>
+	                  ))}
+	                  <button
+	                    type="button"
+	                    style={{ marginTop: 6 }}
+	                    onClick={addPathRewrite}
+	                  >
+	                    + 添加一条路径映射
+	                  </button>
+	                </div>
 	              </div>
 	              <div className="row">
 	                <button
