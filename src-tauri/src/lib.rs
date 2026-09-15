@@ -9,6 +9,7 @@ mod id_extract;
 mod ops;
 mod path_rewrite;
 mod preview;
+mod session_index;
 mod settings;
 mod transfers;
 mod update;

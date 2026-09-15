@@ -192,6 +192,10 @@ export type ImportResult = {
   local_rollout_path?: string | null;
   resume_cmd?: string | null;
   status: "ok" | "canceled" | string;
+  /** 是否已登记到 Codex 会话列表索引 */
+  indexed?: boolean;
+  /** bundle 是否携带 shell_snapshot（已存档、未写回） */
+  shell_snapshot_present?: boolean;
 };
 
 export type ImportBundlesParams = {

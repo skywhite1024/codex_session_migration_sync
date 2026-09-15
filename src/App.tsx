@@ -2983,6 +2983,20 @@ function App() {
 	                    <div className="mono">{it.result.effective_session_id}</div>
 	                    <div>恢复命令</div>
 	                    <div className="mono">{it.result.resume_cmd ?? "-"}</div>
+	                    <div>会话列表</div>
+	                    <div>
+	                      {it.result.indexed === false
+	                        ? "未登记（会话已存在或被取消）"
+	                        : "已登记到 session_index，重启 Codex 后在列表可见"}
+	                    </div>
+	                    {it.result.shell_snapshot_present ? (
+	                      <>
+	                        <div>Shell 快照</div>
+	                        <div className="hint small">
+	                          随包携带，已存档到 vault；出于安全未写回（可能含 A 机环境变量）。
+	                        </div>
+	                      </>
+	                    ) : null}
 	                    <div>本机文件</div>
 	                    <div className="mono">
 	                      {it.result.local_rollout_path ?? "-"}

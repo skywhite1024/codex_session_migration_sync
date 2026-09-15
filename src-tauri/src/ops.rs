@@ -14,6 +14,7 @@ use crate::{
     codex, db, device,
     errors::{AppError, AppResult},
     hash, path_rewrite::{self, PathRewrite},
+    session_index,
     settings,
     transfers::TransferRecord,
     vault,
@@ -169,6 +170,10 @@ pub struct ImportResult {
     pub local_rollout_path: Option<String>,
     pub resume_cmd: Option<String>,
     pub status: String, // ok | canceled
+    /// 是否已登记到 session_index.jsonl（可在 Codex 列表直接看到）。
+    pub indexed: bool,
+    /// bundle 是否携带 shell_snapshot.sh（仅存档，不写回 CODEX_HOME）。
+    pub shell_snapshot_present: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -952,6 +957,8 @@ pub fn import_bundle<R: tauri::Runtime>(
                     local_rollout_path: None,
                     resume_cmd: None,
                     status: "canceled".to_string(),
+                    indexed: false,
+                    shell_snapshot_present: false,
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1086,6 +1093,15 @@ pub fn import_bundle<R: tauri::Runtime>(
         };
         db::transfers_insert(conn, &record)?;
 
+        // 登记到 Codex 的 session_index.jsonl，让导入会话直接出现在列表里。
+        // 纯追加、按 id 去重，不影响本机已有会话。
+        let indexed = session_index::append_session_index(
+            &codex_home,
+            &effective_session_id,
+            &params.name,
+        )?;
+        let shell_snapshot_present = transfer_dir.join("shell_snapshot.sh").exists();
+
         Ok(ImportResult {
             transfer_id,
             vault_dir: transfer_dir.to_string_lossy().to_string(),
@@ -1095,6 +1111,8 @@ pub fn import_bundle<R: tauri::Runtime>(
                 .map(|p| p.to_string_lossy().to_string()),
             resume_cmd: Some(format!("codex resume {}", effective_session_id)),
             status: "ok".to_string(),
+            indexed,
+            shell_snapshot_present,
         })
     })
 }
@@ -1419,6 +1437,8 @@ pub fn restore_from_history<R: tauri::Runtime>(
                     local_rollout_path: None,
                     resume_cmd: None,
                     status: "canceled".to_string(),
+                    indexed: false,
+                    shell_snapshot_present: false,
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1510,6 +1530,13 @@ pub fn restore_from_history<R: tauri::Runtime>(
         };
         db::transfers_insert(conn, &record)?;
 
+        let indexed = session_index::append_session_index(
+            &codex_home,
+            &effective_session_id,
+            &params.name,
+        )?;
+        let shell_snapshot_present = transfer_dir.join("shell_snapshot.sh").exists();
+
         Ok(ImportResult {
             transfer_id,
             vault_dir: transfer_dir.to_string_lossy().to_string(),
@@ -1519,6 +1546,8 @@ pub fn restore_from_history<R: tauri::Runtime>(
                 .map(|p| p.to_string_lossy().to_string()),
             resume_cmd: Some(format!("codex resume {}", effective_session_id)),
             status: "ok".to_string(),
+            indexed,
+            shell_snapshot_present,
         })
     })
 }
