@@ -24,6 +24,7 @@ export type AppStatus = {
 
 export type SessionSummary = {
   id: string;
+  title?: string | null;
   rollout_path: string;
   cwd?: string | null;
   cli_version?: string | null;

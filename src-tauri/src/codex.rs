@@ -30,6 +30,8 @@ pub fn detect_codex_home() -> DetectedCodexHome {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSummary {
     pub id: String,
+    /// Codex 会话列表里显示的标题（session_index.jsonl 的 thread_name），老会话可能为 None。
+    pub title: Option<String>,
     pub rollout_path: String,
     pub cwd: Option<String>,
     pub cli_version: Option<String>,
@@ -133,12 +135,16 @@ pub fn list_sessions(codex_home: &Path, limit: usize) -> Vec<SessionSummary> {
 
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
+    // 读一次会话索引，拿到 id -> 标题（thread_name）映射。
+    let title_map = crate::session_index::read_title_map(codex_home);
+
     let mut out: Vec<SessionSummary> = Vec::new();
     for (_t, path) in candidates {
         if out.len() >= limit {
             break;
         }
-        if let Ok(summary) = parse_rollout_summary(&path) {
+        if let Ok(mut summary) = parse_rollout_summary(&path) {
+            summary.title = title_map.get(&summary.id).cloned();
             out.push(summary);
         }
     }
@@ -252,6 +258,7 @@ fn parse_rollout_summary(path: &Path) -> Result<SessionSummary, String> {
 
     Ok(SessionSummary {
         id,
+        title: None,
         rollout_path: path.to_string_lossy().to_string(),
         cwd,
         cli_version,

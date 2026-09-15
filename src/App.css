@@ -819,3 +819,20 @@ input[type="radio"] {
     border-top-color: rgba(255, 255, 255, 0.12);
   }
 }
+.sessionTitle {
+  font-weight: 600;
+  max-width: 340px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sessionIdLine {
+  font-size: 11px;
+  opacity: 0.62;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 340px;
+}
+.dim { opacity: 0.62; }
+.panelHeader select { max-width: 320px; }

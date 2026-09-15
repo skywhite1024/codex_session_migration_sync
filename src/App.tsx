@@ -324,6 +324,8 @@ function App() {
 
   // Sessions UI
   const [sessionsFilter, setSessionsFilter] = useState("");
+  // 项目文件夹筛选：空串=全部；否则只显示 cwd 等于或位于该文件夹下的会话。
+  const [sessionsCwdFilter, setSessionsCwdFilter] = useState("");
   const [sessionsDetailOpen, setSessionsDetailOpen] = useState(true);
   const [sessionPreview, setSessionPreview] = useState<RolloutPreview | null>(
     null,
@@ -748,16 +750,40 @@ function App() {
     }
   }, [tab, selectedSessionId, selectedSessionIds, exportSessionId, changeIdSessionId]);
 
+  // 按工作目录聚合：每个精确 cwd 下有多少个会话，用于文件夹下拉。
+  const cwdGroups = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const sess of sessions) {
+      const c = (sess.cwd ?? "").trim();
+      if (!c) continue;
+      m.set(c, (m.get(c) ?? 0) + 1);
+    }
+    return Array.from(m, ([cwd, count]) => ({ cwd, count })).sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.cwd.localeCompare(b.cwd);
+    });
+  }, [sessions]);
+
   const filteredSessions = useMemo(() => {
     const q = sessionsFilter.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter((s) => {
+    const root = sessionsCwdFilter.trim();
+    // 归一化：统一分隔符、去尾部斜杠、转小写，兼容 Windows 盘符大小写与 / \ 混用。
+    const norm = (x: string) => x.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const nRoot = norm(root);
+    return sessions.filter((sess) => {
+      if (nRoot) {
+        const c = norm(sess.cwd ?? "");
+        // 边界保护：cwd 等于 root，或 root 之后紧跟路径分隔符才算位于该文件夹下。
+        if (c !== nRoot && !c.startsWith(nRoot + "/")) return false;
+      }
+      if (!q) return true;
       return (
-        s.id.toLowerCase().includes(q) ||
-        (s.cwd ?? "").toLowerCase().includes(q)
+        sess.id.toLowerCase().includes(q) ||
+        (sess.title ?? "").toLowerCase().includes(q) ||
+        (sess.cwd ?? "").toLowerCase().includes(q)
       );
     });
-  }, [sessions, sessionsFilter]);
+  }, [sessions, sessionsFilter, sessionsCwdFilter]);
 
   const filteredSessionsSelection = useMemo(() => {
     if (filteredSessions.length === 0) {
@@ -1188,6 +1214,21 @@ function App() {
     const picked = Array.isArray(selected) ? selected[0] : selected;
     if (!picked) return;
     updatePathRewrite(i, "to", picked);
+  }
+  // 会话列表：选择任意文件夹做"位于该文件夹下（含子目录）"筛选。
+  async function pickSessionCwdFilter() {
+    if (!isTauri) {
+      setError("网页预览模式不支持选择文件夹，请在桌面版（Tauri）中使用。");
+      return;
+    }
+    const selected = await open({
+      title: "选择要筛选的项目文件夹（含其子目录）",
+      directory: true,
+      multiple: false,
+    });
+    const picked = Array.isArray(selected) ? selected[0] : selected;
+    if (!picked) return;
+    setSessionsCwdFilter(picked);
   }
 
   async function handleImport() {
@@ -1661,9 +1702,34 @@ function App() {
 	              <input
 	                value={sessionsFilter}
 	                onChange={(e) => setSessionsFilter(e.target.value)}
-	                placeholder="搜索 会话ID / 工作目录..."
+	                placeholder="搜索 标题 / 会话ID / 工作目录..."
 	                className="grow"
 	              />
+	              <select
+	                value={cwdGroups.some((g) => g.cwd === sessionsCwdFilter) ? sessionsCwdFilter : sessionsCwdFilter ? "__custom__" : ""}
+	                onChange={(e) => setSessionsCwdFilter(e.target.value)}
+	                title="按项目工作目录筛选"
+	              >
+	                <option value="">全部文件夹（{sessions.length}）</option>
+	                {sessionsCwdFilter && !cwdGroups.some((g) => g.cwd === sessionsCwdFilter) ? (
+	                  <option value="__custom__" title={sessionsCwdFilter}>
+	                    {sessionsCwdFilter}（所选文件夹）
+	                  </option>
+	                ) : null}
+	                {cwdGroups.map((g) => (
+	                  <option key={g.cwd} value={g.cwd} title={g.cwd}>
+	                    {g.cwd}（{g.count}）
+	                  </option>
+	                ))}
+	              </select>
+	              <button type="button" onClick={pickSessionCwdFilter} title="选择任意文件夹，筛选其下（含子目录）的全部会话">
+	                选文件夹
+	              </button>
+	              {sessionsCwdFilter ? (
+	                <button type="button" onClick={() => setSessionsCwdFilter("")}>
+	                  清除筛选
+	                </button>
+	              ) : null}
 	              <button
 	                type="button"
 	                  className="sideToggleBtn"
@@ -1722,7 +1788,7 @@ function App() {
 		                          />
 		                        </th>
 		                        <th>文件更新时间</th>
-		                        <th>会话ID</th>
+		                        <th>标题 / 会话ID</th>
 		                        <th>最后事件时间</th>
 		                        <th>大小</th>
 	                        <th>同步</th>
@@ -1771,9 +1837,14 @@ function App() {
 		                              />
 		                            </td>
 		                            <td className="nowrap">{formatTimeMs(s.mtime_ms)}</td>
-		                            <td className="mono small nowrap" title={s.id}>
-		                              {s.id}
-	                            </td>
+		                            <td className="small">
+  <div className="sessionTitle" title={s.title ?? s.id}>
+    {s.title && s.title.trim() ? s.title : <span className="muted">（无标题）</span>}
+  </div>
+  <div className="mono dim sessionIdLine" title={s.id}>
+    {s.id}
+  </div>
+</td>
 	                            <td className="nowrap">
 	                              {formatRfc3339(s.last_event_timestamp)}
 	                            </td>
@@ -1806,6 +1877,8 @@ function App() {
 
 	                <div className="panelFooter">
 	                  <div className="muted">
+	                    显示 <span className="mono">{filteredSessions.length}</span> / {sessions.length} 个
+	                    <span className="dot">•</span>
 	                    当前：{" "}
 	                    <span className="mono">{selectedSessionId ? selectedSessionId : "-"}</span>
 	                    <span className="dot">•</span>

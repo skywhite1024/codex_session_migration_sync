@@ -27,6 +27,7 @@ export const WEB_DEMO_STATUS: AppStatus = {
 export const WEB_DEMO_SESSIONS: SessionSummary[] = [
   {
     id: DEMO_SESSION_A,
+    title: "示例对话：导出流程演示",
     rollout_path: "/demo/sessions/2026/02/26/rollout-demo-a.jsonl",
     cwd: "/path/to/project (demo)",
     cli_version: "0.0.0-demo",
@@ -37,6 +38,7 @@ export const WEB_DEMO_SESSIONS: SessionSummary[] = [
   },
   {
     id: DEMO_SESSION_B,
+    title: "示例对话：冲突时改ID导入",
     rollout_path: "/demo/sessions/2026/02/25/rollout-demo-b.jsonl",
     cwd: "/path/to/another (demo)",
     cli_version: "0.0.0-demo",
@@ -47,6 +49,7 @@ export const WEB_DEMO_SESSIONS: SessionSummary[] = [
   },
   {
     id: DEMO_SESSION_C,
+    title: "示例对话：较早的历史会话",
     rollout_path: "/demo/sessions/2026/02/20/rollout-demo-c.jsonl",
     cwd: "/path/to/legacy (demo)",
     cli_version: "0.0.0-demo",

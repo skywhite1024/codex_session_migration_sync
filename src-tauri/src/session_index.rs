@@ -11,6 +11,7 @@
 
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Write},
     path::Path,
@@ -74,6 +75,40 @@ pub fn append_session_index(
         .map_err(|e| format!("open session_index for append: {e}"))?;
     writeln!(f, "{line}").map_err(|e| format!("append session_index: {e}"))?;
     Ok(true)
+}
+
+/// 读取整个 session_index.jsonl，建立 `id -> thread_name（标题）` 映射。
+///
+/// - 文件不存在或为空时返回空 map（不是错误，老版本 Codex 可能没有索引）；
+/// - 同一 id 出现多行时以**最后一行**为准（Codex 可能更新过标题）；
+/// - thread_name 为空字符串的条目不覆盖已有标题；
+/// - 任何单行解析失败都跳过，不影响其他行。
+pub fn read_title_map(codex_home: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let index_path = codex_home.join("session_index.jsonl");
+    let Ok(f) = fs::File::open(index_path) else {
+        return map;
+    };
+    let reader = BufReader::new(f);
+    for line in reader.lines().flatten() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(id) = v.pointer("/id").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if let Some(name) = v.pointer("/thread_name").and_then(|x| x.as_str()) {
+            let name = name.trim();
+            if !name.is_empty() {
+                map.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
+    map
 }
 
 #[cfg(test)]
