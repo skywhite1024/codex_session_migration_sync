@@ -1095,11 +1095,17 @@ pub fn import_bundle<R: tauri::Runtime>(
 
         // 登记到 Codex 的 session_index.jsonl，让导入会话直接出现在列表里。
         // 纯追加、按 id 去重，不影响本机已有会话。
+        // best-effort：文件可能正被 Codex 占用而锁死，不能让已落盘的 rollout
+        // 因索引写失败而整体报错（rollout 仍可通过 codex resume 使用）。
         let indexed = session_index::append_session_index(
             &codex_home,
             &effective_session_id,
             &params.name,
-        )?;
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("session_index append failed (non-fatal): {e}");
+            false
+        });
         let shell_snapshot_present = transfer_dir.join("shell_snapshot.sh").exists();
 
         Ok(ImportResult {
@@ -1530,11 +1536,16 @@ pub fn restore_from_history<R: tauri::Runtime>(
         };
         db::transfers_insert(conn, &record)?;
 
+        // best-effort：见 import_bundle 处的说明。
         let indexed = session_index::append_session_index(
             &codex_home,
             &effective_session_id,
             &params.name,
-        )?;
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("session_index append failed (non-fatal): {e}");
+            false
+        });
         let shell_snapshot_present = transfer_dir.join("shell_snapshot.sh").exists();
 
         Ok(ImportResult {
