@@ -1,0 +1,27 @@
+// 应用清单资源（Common-Controls v6）。
+//
+// 由 build.rs 经 embed-resource 编译并链接进 *所有* 可链接产物（主 bin、cdylib、
+// 内联单元测试 / 集成测试 / bench / example 的可执行文件）。
+//
+// 资源类型 24 == RT_MANIFEST，资源 ID 1 是 EXE 加载器读取的应用清单。
+// 内容与 tauri-build 默认的 windows-app-manifest.xml 保持一致，仅声明对
+// Microsoft.Windows.Common-Controls 6.0 的依赖；tao/tauri 的对话框与窗口子类化
+// 需要 v6 才导出的 TaskDialogIndirect / SetWindowSubclass 等入口点。
+1 24
+BEGIN
+  "<?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?>\r\n"
+  "<assembly xmlns=""urn:schemas-microsoft-com:asm.v1"" manifestVersion=""1.0"">\r\n"
+  "  <dependency>\r\n"
+  "    <dependentAssembly>\r\n"
+  "      <assemblyIdentity\r\n"
+  "        type=""win32""\r\n"
+  "        name=""Microsoft.Windows.Common-Controls""\r\n"
+  "        version=""6.0.0.0""\r\n"
+  "        processorArchitecture=""*""\r\n"
+  "        publicKeyToken=""6595b64144ccf1df""\r\n"
+  "        language=""*""\r\n"
+  "      />\r\n"
+  "    </dependentAssembly>\r\n"
+  "  </dependency>\r\n"
+  "</assembly>\r\n"
+END

@@ -507,6 +507,7 @@ name = "codexrelay"
 version = "0.1.7"
 dependencies = [
  "dirs",
+ "embed-resource",
  "hex",
  "rusqlite",
  "serde",

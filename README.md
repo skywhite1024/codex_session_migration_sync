@@ -209,6 +209,18 @@ pnpm tauri dev
 
 没装 MSVC C++ Build Tools，按 [Windows 环境要求](#windows) 第 4 步安装"使用 C++ 的桌面开发"工作负载。
 
+### `cargo test` 一运行就退出，报 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`（Windows）
+
+这**不是**重启系统或更新 VC 运行库能解决的问题，而是测试可执行文件缺少应用清单（manifest）：tauri/tao 依赖 Common-Controls v6 才导出的 `TaskDialogIndirect`、`SetWindowSubclass` 等入口点，而 tauri-build 默认只把清单嵌进主程序，`cargo test` 生成的测试 harness 拿不到，于是加载到 comctl32 v5，在执行任何 Rust 代码前就崩溃。
+
+本仓库已在构建层根治：`src-tauri/build.rs` 改用 `new_without_app_manifest()` 让 tauri 资源只含图标/版本，再通过 `embed-resource` 的 `compile_for_everything()` 把 `src-tauri/app-manifest.rc`（Common-Controls v6 清单）统一链接进主程序与所有测试可执行文件。因此正常情况下你**不需要任何额外操作**，直接：
+
+```powershell
+pnpm check        # = 前端构建 + cargo test
+```
+
+若你在自行改造后仍遇到该错误，确认 `src-tauri/app-manifest.rc` 存在、`Cargo.toml` 的 `[build-dependencies]` 里有 `embed-resource`，且 `build.rs` 中调用了 `embed_resource::compile_for_everything(..)`；必要时 `cargo clean` 后重试。
+
 ### `[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: esbuild`
 
 pnpm 安全策略拦截了 esbuild 的构建脚本。仓库 `pnpm-workspace.yaml` 已声明 `allowBuilds: esbuild: true`；若仍出现，执行：
@@ -287,10 +299,13 @@ codex_session_migration_sync/
 │   ├── src/
 │   │   ├── codex.rs            # 扫描 ~/.codex/sessions、读取会话元信息与标题
 │   │   ├── ops.rs              # 导出 / 导入 / 恢复主流程
-│   │   ├── path_rewrite.rs     # 跨设备路径重绑（含边界保护）
+│   │   ├── path_rewrite.rs     # 跨设备路径重绑（含边界保护、跨 OS 绝对路径校验）
 │   │   ├── session_index.rs    # session_index.jsonl 读取标题 / 追加登记
 │   │   ├── bundle.rs           # zip 打包 / 解包与校验
 │   │   └── vault.rs            # 本地留档与回滚
+│   ├── tests/manifest_harness.rs  # 集成测试冒烟（同时验证测试 exe 的 manifest 注入）
+│   ├── app-manifest.rc         # Common-Controls v6 清单资源（build.rs 注入主程序与测试）
+│   ├── build.rs                # tauri-build + embed-resource 清单统一注入
 │   └── tauri.conf.json
 ├── pnpm-workspace.yaml         # 已声明允许 esbuild 构建脚本
 └── PATH_REBIND.md              # 路径重绑设计说明

@@ -35,7 +35,11 @@ impl PathRewrite {
         if from.is_empty() {
             return Err("路径映射的「旧路径」不能为空".to_string());
         }
-        if !Path::new(from).is_absolute() {
+        // 注意：不能用当前平台的 `Path::is_absolute()`。本工具的核心场景就是跨 OS
+        // 迁移——在 Windows 上导入 macOS/Linux 导出的会话时，「旧路径」形如
+        // `/Users/alex/proj`，对 Windows 的 `Path` 而言并不算绝对路径，但它确实是
+        // A 机上的绝对路径。因此这里同时接受 POSIX 与 Windows 两种绝对路径写法。
+        if !is_absolute_any_platform(from) {
             return Err(format!(
                 "路径映射的「旧路径」必须是绝对路径（当前：{from:?}）"
             ));
@@ -45,6 +49,25 @@ impl PathRewrite {
         }
         Ok(())
     }
+}
+
+/// 平台无关的绝对路径判断，同时接受 POSIX 与 Windows 两种写法。
+///
+/// - Windows 盘符路径：`C:\...`、`C:/...`
+/// - Windows UNC 路径：`\\server\share`、`//server/share`
+/// - POSIX 路径：`/Users/...`
+fn is_absolute_any_platform(p: &str) -> bool {
+    let bytes = p.as_bytes();
+    // 盘符：X:\ 或 X:/
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    // UNC 或 POSIX 绝对路径。
+    p.starts_with('/') || p.starts_with('\\')
 }
 
 /// 预编译后的映射，同时保留原始形式与 JSON 转义形式。

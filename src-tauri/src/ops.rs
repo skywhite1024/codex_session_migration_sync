@@ -866,7 +866,7 @@ pub fn import_bundle<R: tauri::Runtime>(
                     manifest.schema_version
                 ),
             )
-            .with_hint("请更新 CodexRelay 到较新版本后再导入。"));
+            .with_hint("请更新本工具（codex_session_migration_sync）到较新版本后再导入。"));
         }
 
         // Validate rollout sha/size.
@@ -1269,7 +1269,7 @@ pub fn import_bundles<R: tauri::Runtime>(
             Ok(ZipBundleKind::Unknown) => {
                 out_errors.push(ImportBundlesError {
                     source: p.clone(),
-                    message: "不是有效的 CodexRelay 导出包：缺少 manifest.json/rollout.jsonl，且未找到 bundles/*.zip"
+                    message: "不是有效的导出包（应由 codex_session_migration_sync 或 CodexRelay 生成）：缺少 manifest.json/rollout.jsonl，且未找到 bundles/*.zip"
                         .to_string(),
                 });
             }
@@ -1738,7 +1738,7 @@ fn build_bundle_filename(op: &str, session_id: &str, name: &str) -> String {
     // Keep filenames short and cross-platform safe (esp. Windows).
     let safe_id = sanitize_filename_component(session_id, 64);
     let mut safe_name = sanitize_filename_component(name, 64);
-    let mut file = format!("CodexRelay-{op}-{ts}-{safe_id}-{safe_name}.zip");
+    let mut file = format!("codex-session-sync-{op}-{ts}-{safe_id}-{safe_name}.zip");
 
     // Hard cap to avoid absurdly long paths (best-effort).
     const MAX_CHARS: usize = 180;
@@ -1746,7 +1746,7 @@ fn build_bundle_filename(op: &str, session_id: &str, name: &str) -> String {
         let extra = file.chars().count().saturating_sub(MAX_CHARS);
         let target_len = safe_name.chars().count().saturating_sub(extra + 3);
         safe_name = safe_name.chars().take(target_len.max(8)).collect();
-        file = format!("CodexRelay-{op}-{ts}-{safe_id}-{safe_name}.zip");
+        file = format!("codex-session-sync-{op}-{ts}-{safe_id}-{safe_name}.zip");
     }
     file
 }
@@ -1762,7 +1762,7 @@ fn build_batch_bundle_filename(op: &str, name: &str) -> String {
     let ts = format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}Z");
 
     let safe_name = sanitize_filename_component(name, 80);
-    let mut file = format!("CodexRelay-{op}-batch-{ts}-{safe_name}.zip");
+    let mut file = format!("codex-session-sync-{op}-batch-{ts}-{safe_name}.zip");
 
     const MAX_CHARS: usize = 180;
     if file.chars().count() > MAX_CHARS {
@@ -1772,7 +1772,7 @@ fn build_batch_bundle_filename(op: &str, name: &str) -> String {
             .chars()
             .take(target_len.max(8))
             .collect::<String>();
-        file = format!("CodexRelay-{op}-batch-{ts}-{safe_name}.zip");
+        file = format!("codex-session-sync-{op}-batch-{ts}-{safe_name}.zip");
     }
     file
 }
@@ -1814,7 +1814,7 @@ fn unique_path_in_dir(dir: &Path, file_name: &str) -> PathBuf {
     let stem = p
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("CodexRelay");
+        .unwrap_or("codex-session-sync");
     let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
     for i in 2..=9999 {
         let name = if ext.is_empty() {

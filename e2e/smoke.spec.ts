@@ -5,7 +5,7 @@ const shotsDir = "test-results/screenshots";
 test("页面与各 Tab 可渲染（用于排版自测）", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "CodexRelay" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "codex_session_migration_sync" })).toBeVisible();
   const tabs = page.locator("nav.tabs");
 
   // Sessions

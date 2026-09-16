@@ -68,11 +68,22 @@ pub fn append_session_index(
     };
     let line = serde_json::to_string(&entry).map_err(|e| format!("serialize index entry: {e}"))?;
 
+    // 若索引文件已存在但最后一行没有以换行结尾（很常见），直接 append 会把新记录
+    // 拼到最后一行尾部，形成一条无法解析的 JSON，既损坏原有最后一行，也会让后续的
+    // 去重检测漏掉新写入的 id。这里先读出末尾字节，必要时补一个换行。
+    let need_leading_newline = fs::read(&index_path)
+        .map(|bytes| matches!(bytes.last(), Some(last) if *last != b'\n'))
+        .unwrap_or(false);
+
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&index_path)
         .map_err(|e| format!("open session_index for append: {e}"))?;
+    if need_leading_newline {
+        f.write_all(b"\n")
+            .map_err(|e| format!("separate previous session_index line: {e}"))?;
+    }
     writeln!(f, "{line}").map_err(|e| format!("append session_index: {e}"))?;
     Ok(true)
 }
