@@ -184,6 +184,8 @@ export type ImportParams = {
   strategy: ConflictStrategy;
   /** 跨设备导入时把旧路径前缀重绑为 B 机路径（重绑 cwd） */
   path_rewrites?: PathRewrite[] | null;
+  /** 将导入后会话的实际 cwd 注册为当前设备上的 Codex 可信项目。 */
+  trust_project_paths?: boolean;
 };
 
 export type ImportResult = {
@@ -197,6 +199,13 @@ export type ImportResult = {
   indexed?: boolean;
   /** bundle 是否携带 shell_snapshot（已存档、未写回） */
   shell_snapshot_present?: boolean;
+  project_cwd?: string | null;
+  project_trusted?: boolean | null;
+  project_trust_changed?: boolean;
+  project_trust_error?: string | null;
+  restart_required?: boolean;
+  desktop_registered?: boolean | null;
+  desktop_registration_error?: string | null;
 };
 
 export type ImportBundlesParams = {
@@ -206,6 +215,8 @@ export type ImportBundlesParams = {
   strategy: ConflictStrategy;
   /** 批量导入时统一应用的路径重绑规则 */
   path_rewrites?: PathRewrite[] | null;
+  /** 将每个导入会话的实际 cwd 注册为 Codex 可信项目。 */
+  trust_project_paths?: boolean;
 };
 
 export type ImportBundlesItem = {

@@ -58,13 +58,15 @@ export async function exportSessions(
 export async function inspectBundle(
   bundle_path: string,
 ): Promise<InspectBundleResult> {
-  return invoke<InspectBundleResult>("inspect_bundle", { bundle_path });
+  return invoke<InspectBundleResult>("inspect_bundle", { bundlePath: bundle_path });
 }
 
 export async function inspectBatchZip(
   bundle_path: string,
 ): Promise<InspectBatchZipResult> {
-  return invoke<InspectBatchZipResult>("inspect_batch_zip", { bundle_path });
+  return invoke<InspectBatchZipResult>("inspect_batch_zip", {
+    bundlePath: bundle_path,
+  });
 }
 
 export async function importBundle(params: ImportParams): Promise<ImportResult> {

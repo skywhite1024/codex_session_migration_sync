@@ -13,9 +13,9 @@ use crate::{
     },
     codex, db, device,
     errors::{AppError, AppResult},
-    hash, path_rewrite::{self, PathRewrite},
-    session_index,
-    settings,
+    hash,
+    path_rewrite::{self, PathRewrite},
+    session_index, settings,
     transfers::TransferRecord,
     vault,
 };
@@ -152,6 +152,9 @@ pub struct ImportParams {
     /// 可选的旧路径→新路径前缀映射（跨设备导入时重绑 cwd）。
     #[serde(default)]
     pub path_rewrites: Option<Vec<PathRewrite>>,
+    /// 将导入后 rollout 的实际 cwd 注册为当前设备上的 Codex 可信项目。
+    #[serde(default)]
+    pub trust_project_paths: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -174,6 +177,20 @@ pub struct ImportResult {
     pub indexed: bool,
     /// bundle 是否携带 shell_snapshot.sh（仅存档，不写回 CODEX_HOME）。
     pub shell_snapshot_present: bool,
+    /// 路径重绑完成后，rollout 中实际保存的工作目录。
+    pub project_cwd: Option<String>,
+    /// 请求注册可信项目时的结果；未请求或没有 cwd 时为 None。
+    pub project_trusted: Option<bool>,
+    /// 本次是否实际修改了 config.toml。
+    pub project_trust_changed: bool,
+    /// 信任配置失败不会回滚已成功导入的会话，错误在此返回。
+    pub project_trust_error: Option<String>,
+    /// Codex Desktop 需要完整退出并重新启动，才会重新读取索引和项目配置。
+    pub restart_required: bool,
+    /// 是否已通过 Codex app-server 的 metadata-only resume 登记到桌面端任务目录。
+    pub desktop_registered: Option<bool>,
+    /// 桌面端登记失败不会回滚已写入的会话文件。
+    pub desktop_registration_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +202,9 @@ pub struct ImportBundlesParams {
     /// 批量导入时统一应用的路径重绑规则。
     #[serde(default)]
     pub path_rewrites: Option<Vec<PathRewrite>>,
+    /// 将每个导入会话的实际 cwd 注册为 Codex 可信项目。
+    #[serde(default)]
+    pub trust_project_paths: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -959,6 +979,13 @@ pub fn import_bundle<R: tauri::Runtime>(
                     status: "canceled".to_string(),
                     indexed: false,
                     shell_snapshot_present: false,
+                    project_cwd: None,
+                    project_trusted: None,
+                    project_trust_changed: false,
+                    project_trust_error: None,
+                    restart_required: false,
+                    desktop_registered: None,
+                    desktop_registration_error: None,
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1097,16 +1124,35 @@ pub fn import_bundle<R: tauri::Runtime>(
         // 纯追加、按 id 去重，不影响本机已有会话。
         // best-effort：文件可能正被 Codex 占用而锁死，不能让已落盘的 rollout
         // 因索引写失败而整体报错（rollout 仍可通过 codex resume 使用）。
-        let indexed = session_index::append_session_index(
-            &codex_home,
-            &effective_session_id,
-            &params.name,
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("session_index append failed (non-fatal): {e}");
-            false
-        });
+        let indexed =
+            session_index::append_session_index(&codex_home, &effective_session_id, &params.name)
+                .unwrap_or_else(|e| {
+                    eprintln!("session_index append failed (non-fatal): {e}");
+                    false
+                });
         let shell_snapshot_present = transfer_dir.join("shell_snapshot.sh").exists();
+        let project_cwd = local_written_path.as_ref().and_then(|path| {
+            codex::read_rollout_meta(&codex_home, path)
+                .ok()
+                .and_then(|meta| meta.cwd)
+        });
+        let (project_trusted, project_trust_changed, project_trust_error) =
+            if params.trust_project_paths {
+                if let Some(cwd) = project_cwd.as_deref() {
+                    match crate::codex_config::ensure_project_trusted(&codex_home, Path::new(cwd)) {
+                        Ok(result) => (Some(result.trusted), result.changed, None),
+                        Err(error) => (Some(false), false, Some(error)),
+                    }
+                } else {
+                    (
+                        Some(false),
+                        false,
+                        Some("导入会话没有 cwd，无法注册可信项目".to_string()),
+                    )
+                }
+            } else {
+                (None, false, None)
+            };
 
         Ok(ImportResult {
             transfer_id,
@@ -1119,6 +1165,13 @@ pub fn import_bundle<R: tauri::Runtime>(
             status: "ok".to_string(),
             indexed,
             shell_snapshot_present,
+            project_cwd,
+            project_trusted,
+            project_trust_changed,
+            project_trust_error,
+            restart_required: true,
+            desktop_registered: None,
+            desktop_registration_error: None,
         })
     })
 }
@@ -1185,6 +1238,7 @@ pub fn import_bundles<R: tauri::Runtime>(
                         note: params.note.clone(),
                         strategy: params.strategy.clone(),
                         path_rewrites: params.path_rewrites.clone(),
+                        trust_project_paths: params.trust_project_paths,
                     },
                 ) {
                     Ok(r) => out_items.push(ImportBundlesItem {
@@ -1246,6 +1300,7 @@ pub fn import_bundles<R: tauri::Runtime>(
                             note: params.note.clone(),
                             strategy: params.strategy.clone(),
                             path_rewrites: params.path_rewrites.clone(),
+                            trust_project_paths: params.trust_project_paths,
                         },
                     ) {
                         Ok(r) => out_items.push(ImportBundlesItem {
@@ -1277,6 +1332,41 @@ pub fn import_bundles<R: tauri::Runtime>(
                 source: p.clone(),
                 message: e.message,
             }),
+        }
+    }
+
+    // Codex Desktop maintains an app-server thread catalog in addition to
+    // session_index.jsonl. Resume only the metadata for every successful import;
+    // this does not start a turn or append anything to the conversation.
+    let imported_ids: Vec<String> = out_items
+        .iter()
+        .filter(|item| item.result.status == "ok")
+        .map(|item| item.result.effective_session_id.clone())
+        .collect();
+    if !imported_ids.is_empty() {
+        let codex_home = db::with_conn(app, |conn| {
+            settings::resolve_codex_home(conn).map(|(path, _)| path)
+        })?;
+        let registrations = crate::app_server::register_threads(&codex_home, &imported_ids);
+        for item in &mut out_items {
+            if item.result.status != "ok" {
+                continue;
+            }
+            match registrations.get(&item.result.effective_session_id) {
+                Some(Ok(())) => {
+                    item.result.desktop_registered = Some(true);
+                    item.result.desktop_registration_error = None;
+                }
+                Some(Err(error)) => {
+                    item.result.desktop_registered = Some(false);
+                    item.result.desktop_registration_error = Some(error.clone());
+                }
+                None => {
+                    item.result.desktop_registered = Some(false);
+                    item.result.desktop_registration_error =
+                        Some("Codex app-server 未返回该会话的登记结果".to_string());
+                }
+            }
         }
     }
 
@@ -1445,6 +1535,13 @@ pub fn restore_from_history<R: tauri::Runtime>(
                     status: "canceled".to_string(),
                     indexed: false,
                     shell_snapshot_present: false,
+                    project_cwd: None,
+                    project_trusted: None,
+                    project_trust_changed: false,
+                    project_trust_error: None,
+                    restart_required: false,
+                    desktop_registered: None,
+                    desktop_registration_error: None,
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1537,16 +1634,18 @@ pub fn restore_from_history<R: tauri::Runtime>(
         db::transfers_insert(conn, &record)?;
 
         // best-effort：见 import_bundle 处的说明。
-        let indexed = session_index::append_session_index(
-            &codex_home,
-            &effective_session_id,
-            &params.name,
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("session_index append failed (non-fatal): {e}");
-            false
-        });
+        let indexed =
+            session_index::append_session_index(&codex_home, &effective_session_id, &params.name)
+                .unwrap_or_else(|e| {
+                    eprintln!("session_index append failed (non-fatal): {e}");
+                    false
+                });
         let shell_snapshot_present = transfer_dir.join("shell_snapshot.sh").exists();
+        let project_cwd = local_written_path.as_ref().and_then(|path| {
+            codex::read_rollout_meta(&codex_home, path)
+                .ok()
+                .and_then(|meta| meta.cwd)
+        });
 
         Ok(ImportResult {
             transfer_id,
@@ -1559,6 +1658,13 @@ pub fn restore_from_history<R: tauri::Runtime>(
             status: "ok".to_string(),
             indexed,
             shell_snapshot_present,
+            project_cwd,
+            project_trusted: None,
+            project_trust_changed: false,
+            project_trust_error: None,
+            restart_required: true,
+            desktop_registered: None,
+            desktop_registration_error: None,
         })
     })
 }
@@ -2167,6 +2273,7 @@ mod tests {
                 note: None,
                 strategy: ConflictStrategy::Overwrite,
                 path_rewrites: None,
+                trust_project_paths: false,
             },
         )
         .unwrap();
@@ -2228,6 +2335,7 @@ mod tests {
                 note: None,
                 strategy: ConflictStrategy::Recommended,
                 path_rewrites: None,
+                trust_project_paths: false,
             },
         )
         .unwrap();
@@ -2295,6 +2403,7 @@ mod tests {
                 note: None,
                 strategy: ConflictStrategy::Overwrite,
                 path_rewrites: None,
+                trust_project_paths: false,
             },
         )
         .unwrap();

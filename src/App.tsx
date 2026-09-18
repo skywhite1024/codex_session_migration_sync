@@ -365,6 +365,7 @@ function App() {
     useState<ConflictStrategy>("overwrite");
   const [importPathRewrites, setImportPathRewrites] =
     useState<PathRewrite[]>([]);
+  const [importTrustProjects, setImportTrustProjects] = useState(true);
   const [importBatchResult, setImportBatchResult] =
     useState<ImportBundlesResult | null>(null);
   const [bundlePreview, setBundlePreview] = useState<RolloutPreview | null>(
@@ -1257,6 +1258,7 @@ function App() {
         note: importNote.trim() ? importNote.trim() : null,
         strategy: importStrategy,
         path_rewrites: activeRewrites.length ? activeRewrites : null,
+        trust_project_paths: importTrustProjects,
       });
       setImportBatchResult(r);
       await refreshStatusAndSessions();
@@ -3002,6 +3004,21 @@ function App() {
 	                    + 添加一条路径映射
 	                  </button>
 	                </div>
+	                <label className="field">
+	                  <div className="label">Codex 桌面端可见性</div>
+	                  <span className="radio">
+	                    <input
+	                      type="checkbox"
+	                      checked={importTrustProjects}
+	                      onChange={(e) => setImportTrustProjects(e.target.checked)}
+	                    />
+	                    <span>将导入会话的实际工作目录注册为 Codex 可信项目（推荐）</span>
+	                  </span>
+	                  <div className="hint muted small">
+	                    会修改 CODEX_HOME/config.toml，并在首次修改前创建
+	                    config.toml.codexrelay.bak。导入完成后需完整退出并重启 Codex Desktop。
+	                  </div>
+	                </label>
 	              </div>
 	              <div className="row">
 	                <button
@@ -3036,6 +3053,25 @@ function App() {
 	                  </pre>
 	                </div>
 	              ) : null}
+	              {importBatchResult.imported > 0 ? (
+	                <div className="hint">
+	                  {importBatchResult.items.some(
+	                    (it) => it.result.desktop_registration_error,
+	                  )
+	                    ? "会话文件已导入，但部分任务未能登记到 Codex Desktop；请查看下方错误。"
+	                    : importBatchResult.items.some(
+	                    (it) => it.result.project_trust_error,
+	                  )
+	                    ? "会话文件已导入，但部分项目目录未能注册为可信项目；请先处理下方错误，再完整退出并重启 Codex Desktop。"
+	                    : importBatchResult.items.every(
+	                          (it) => it.result.desktop_registered === true,
+	                        ) && importBatchResult.items.every(
+	                          (it) => it.result.project_trusted === true,
+	                        )
+	                      ? "导入、项目可信配置和桌面端任务登记均已完成。请完整退出 Codex Desktop 后重新启动，随后在对应项目目录下查看任务。"
+	                      : "会话文件已导入，但桌面端登记或可信配置未完成；请查看每条结果的状态。"}
+	                </div>
+	              ) : null}
 	              {importBatchResult.items.map((it, idx) => (
 	                <div
 	                  className="resultBlock"
@@ -3059,9 +3095,35 @@ function App() {
 	                    <div>会话列表</div>
 	                    <div>
 	                      {it.result.indexed === false
-	                        ? "未登记（会话已存在或被取消）"
-	                        : "已登记到 session_index，重启 Codex 后在列表可见"}
+	                        ? "索引记录已存在，或本次追加未完成"
+	                        : "已登记到 session_index"}
 	                    </div>
+	                    <div>项目目录</div>
+	                    <div className="mono">{it.result.project_cwd ?? "-"}</div>
+	                    <div>项目可信状态</div>
+	                    <div>
+	                      {it.result.project_trust_error
+	                        ? `配置失败：${it.result.project_trust_error}`
+	                        : it.result.project_trusted === true
+	                          ? it.result.project_trust_changed
+	                            ? "已注册为可信项目（本次新增）"
+	                            : "已是可信项目"
+	                          : "未请求自动注册；首次打开时 Codex 可能要求确认信任"}
+	                    </div>
+	                    <div>Codex Desktop 登记</div>
+	                    <div>
+	                      {it.result.desktop_registration_error
+	                        ? `登记失败：${it.result.desktop_registration_error}`
+	                        : it.result.desktop_registered === true
+	                          ? "已通过 app-server 登记（不会新增消息）"
+	                          : "尚未登记"}
+	                    </div>
+	                    {it.result.restart_required ? (
+	                      <>
+	                        <div>后续操作</div>
+	                        <div>完整退出并重启 Codex Desktop 后，在上述项目目录中查看。</div>
+	                      </>
+	                    ) : null}
 	                    {it.result.shell_snapshot_present ? (
 	                      <>
 	                        <div>Shell 快照</div>
