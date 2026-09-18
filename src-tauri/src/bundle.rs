@@ -35,6 +35,8 @@ pub struct ManifestCodexInfo {
 pub struct BundleManifest {
     pub schema_version: u32,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_title: Option<String>,
     pub note: Option<String>,
     pub session_id: String,
     pub created_at: String,

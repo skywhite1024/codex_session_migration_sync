@@ -57,6 +57,7 @@ export type ManifestCodexInfo = {
 export type BundleManifest = {
   schema_version: number;
   name: string;
+  thread_title?: string | null;
   note?: string | null;
   session_id: string;
   created_at: string;
@@ -206,6 +207,7 @@ export type ImportResult = {
   restart_required?: boolean;
   desktop_registered?: boolean | null;
   desktop_registration_error?: string | null;
+  thread_title?: string | null;
 };
 
 export type ImportBundlesParams = {

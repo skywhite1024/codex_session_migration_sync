@@ -112,9 +112,13 @@ async fn import_bundle(
     app: tauri::AppHandle,
     params: ops::ImportParams,
 ) -> AppResult<ops::ImportResult> {
-    tauri::async_runtime::spawn_blocking(move || ops::import_bundle(&app, params))
-        .await
-        .map_err(|e| AppError::internal(format!("import task join error: {e}")))?
+    let app_for_task = app.clone();
+    let mut result =
+        tauri::async_runtime::spawn_blocking(move || ops::import_bundle(&app_for_task, params))
+            .await
+            .map_err(|e| AppError::internal(format!("import task join error: {e}")))??;
+    ops::register_imported_thread(&app, &mut result)?;
+    Ok(result)
 }
 
 #[tauri::command]

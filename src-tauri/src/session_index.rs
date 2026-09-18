@@ -88,6 +88,57 @@ pub fn append_session_index(
     Ok(true)
 }
 
+pub fn upsert_session_title(
+    codex_home: &Path,
+    id: &str,
+    thread_name: &str,
+) -> Result<bool, String> {
+    let index_path = codex_home.join("session_index.jsonl");
+    let mut lines: Vec<String> = if index_path.exists() {
+        fs::read_to_string(&index_path)
+            .map_err(|e| format!("read session_index: {e}"))?
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut found = false;
+    let mut changed = false;
+    for line in &mut lines {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.pointer("/id").and_then(|v| v.as_str()) != Some(id) {
+            continue;
+        }
+        found = true;
+        if value.pointer("/thread_name").and_then(|v| v.as_str()) != Some(thread_name) {
+            value["thread_name"] = serde_json::Value::String(thread_name.to_string());
+            *line = serde_json::to_string(&value)
+                .map_err(|e| format!("serialize session_index entry: {e}"))?;
+            changed = true;
+        }
+        break;
+    }
+    if !found {
+        let entry = IndexEntry {
+            id: id.to_string(),
+            thread_name: thread_name.to_string(),
+            updated_at: crate::bundle::now_rfc3339_utc()?,
+        };
+        lines.push(
+            serde_json::to_string(&entry).map_err(|e| format!("serialize index entry: {e}"))?,
+        );
+        changed = true;
+    }
+    if changed {
+        fs::write(&index_path, format!("{}\n", lines.join("\n")))
+            .map_err(|e| format!("write session_index: {e}"))?;
+    }
+    Ok(changed)
+}
+
 /// 读取整个 session_index.jsonl，建立 `id -> thread_name（标题）` 映射。
 ///
 /// - 文件不存在或为空时返回空 map（不是错误，老版本 Codex 可能没有索引）；

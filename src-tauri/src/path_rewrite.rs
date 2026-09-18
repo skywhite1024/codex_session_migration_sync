@@ -123,11 +123,12 @@ fn apply_line(line: &str, rules: &[CompiledRewrite]) -> String {
                 .chain(rest.find(&r.from_raw).map(|i| (i, false)))
             {
                 // 边界检查：命中片段之后必须是合法边界。
-                let after = &rest[idx + (if is_json {
-                    r.from_json.len()
-                } else {
-                    r.from_raw.len()
-                })..];
+                let after = &rest[idx
+                    + (if is_json {
+                        r.from_json.len()
+                    } else {
+                        r.from_raw.len()
+                    })..];
                 if !boundary_ok(after) {
                     continue;
                 }
@@ -142,7 +143,11 @@ fn apply_line(line: &str, rules: &[CompiledRewrite]) -> String {
             return out;
         };
         out.push_str(&rest[..idx]);
-        let consumed = if is_json { r.from_json.len() } else { r.from_raw.len() };
+        let consumed = if is_json {
+            r.from_json.len()
+        } else {
+            r.from_raw.len()
+        };
         out.push_str(if is_json { &r.to_json } else { &r.to_raw });
         rest = &rest[idx + consumed..];
     }
@@ -219,7 +224,9 @@ pub fn rewrite_rollout(
         writeln!(writer, "{final_text}").map_err(|e| format!("write rollout: {e}"))?;
     }
 
-    writer.flush().map_err(|e| format!("flush rewritten rollout: {e}"))?;
+    writer
+        .flush()
+        .map_err(|e| format!("flush rewritten rollout: {e}"))?;
     Ok(())
 }
 
@@ -229,9 +236,24 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_relative_from() {
-        assert!(PathRewrite { from: "  ".into(), to: "D:\\a".into() }.validate().is_err());
-        assert!(PathRewrite { from: "relative/path".into(), to: "D:\\a".into() }.validate().is_err());
-        assert!(PathRewrite { from: "D:\\a".into(), to: "".into() }.validate().is_err());
+        assert!(PathRewrite {
+            from: "  ".into(),
+            to: "D:\\a".into()
+        }
+        .validate()
+        .is_err());
+        assert!(PathRewrite {
+            from: "relative/path".into(),
+            to: "D:\\a".into()
+        }
+        .validate()
+        .is_err());
+        assert!(PathRewrite {
+            from: "D:\\a".into(),
+            to: "".into()
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
@@ -261,7 +283,8 @@ mod tests {
 
     #[test]
     fn rewrites_posix_paths_and_keeps_tail() {
-        let line = r#"{"payload":{"cwd":"/Users/alex/proj"},"cmd":"cd /Users/alex/proj/src && ls"}"#;
+        let line =
+            r#"{"payload":{"cwd":"/Users/alex/proj"},"cmd":"cd /Users/alex/proj/src && ls"}"#;
         let rw = PathRewrite {
             from: "/Users/alex/proj".into(),
             to: "/home/bob/work/proj".into(),
@@ -293,7 +316,10 @@ mod tests {
             &dst,
             Some("new-id"),
             "old",
-            &[PathRewrite { from: "/Users/alex/proj".into(), to: "/srv/proj".into() }],
+            &[PathRewrite {
+                from: "/Users/alex/proj".into(),
+                to: "/srv/proj".into(),
+            }],
         )
         .unwrap();
 

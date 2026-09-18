@@ -191,6 +191,8 @@ pub struct ImportResult {
     pub desktop_registered: Option<bool>,
     /// 桌面端登记失败不会回滚已写入的会话文件。
     pub desktop_registration_error: Option<String>,
+    /// Title to apply to the desktop thread catalog after import.
+    pub thread_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -226,6 +228,41 @@ pub struct ImportBundlesResult {
     pub failed: usize,
     pub items: Vec<ImportBundlesItem>,
     pub errors: Vec<ImportBundlesError>,
+}
+
+pub fn register_imported_thread<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    result: &mut ImportResult,
+) -> AppResult<()> {
+    if result.status != "ok" {
+        return Ok(());
+    }
+    let codex_home = db::with_conn(app, |conn| {
+        settings::resolve_codex_home(conn).map(|(path, _)| path)
+    })?;
+    let ids = vec![result.effective_session_id.clone()];
+    let mut titles = std::collections::HashMap::new();
+    if let Some(title) = result.thread_title.clone() {
+        titles.insert(result.effective_session_id.clone(), title);
+    }
+    match crate::app_server::register_threads(&codex_home, &ids, &titles)
+        .remove(&result.effective_session_id)
+    {
+        Some(Ok(())) => {
+            result.desktop_registered = Some(true);
+            result.desktop_registration_error = None;
+        }
+        Some(Err(error)) => {
+            result.desktop_registered = Some(false);
+            result.desktop_registration_error = Some(error);
+        }
+        None => {
+            result.desktop_registered = Some(false);
+            result.desktop_registration_error =
+                Some("Codex app-server did not return a registration result".to_string());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -277,6 +314,9 @@ pub fn export_session<R: tauri::Runtime>(
             })?;
 
         let meta = codex::read_rollout_meta(&codex_home, &rollout_src)?;
+        let thread_title = session_index::read_title_map(&codex_home)
+            .get(&params.session_id)
+            .cloned();
         if meta.id != params.session_id {
             return Err(AppError::integrity(format!(
                 "会话文件 session_meta.id 不匹配：期望 {}，实际 {}",
@@ -309,6 +349,7 @@ pub fn export_session<R: tauri::Runtime>(
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
             name: params.name.clone(),
+            thread_title,
             note: params.note.clone(),
             session_id: params.session_id.clone(),
             created_at: created_at.clone(),
@@ -509,6 +550,7 @@ pub fn export_sessions<R: tauri::Runtime>(
                     inner_zip: String,
                     resume_cmd: String,
                     name: String,
+                    thread_title: Option<String>,
                     note: Option<String>,
                     created_at: String,
                     rollout_sha256: String,
@@ -539,6 +581,7 @@ pub fn export_sessions<R: tauri::Runtime>(
                             inner_zip: format!("bundles/{}.zip", it.session_id),
                             resume_cmd: it.resume_cmd.clone(),
                             name: it.manifest.name.clone(),
+                            thread_title: it.manifest.thread_title.clone(),
                             note: it.manifest.note.clone(),
                             created_at: it.manifest.created_at.clone(),
                             rollout_sha256: it.manifest.rollout.sha256.clone(),
@@ -986,6 +1029,7 @@ pub fn import_bundle<R: tauri::Runtime>(
                     restart_required: false,
                     desktop_registered: None,
                     desktop_registration_error: None,
+                    thread_title: None,
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1124,8 +1168,12 @@ pub fn import_bundle<R: tauri::Runtime>(
         // 纯追加、按 id 去重，不影响本机已有会话。
         // best-effort：文件可能正被 Codex 占用而锁死，不能让已落盘的 rollout
         // 因索引写失败而整体报错（rollout 仍可通过 codex resume 使用）。
+        let thread_title = manifest
+            .thread_title
+            .clone()
+            .unwrap_or_else(|| params.name.clone());
         let indexed =
-            session_index::append_session_index(&codex_home, &effective_session_id, &params.name)
+            session_index::upsert_session_title(&codex_home, &effective_session_id, &thread_title)
                 .unwrap_or_else(|e| {
                     eprintln!("session_index append failed (non-fatal): {e}");
                     false
@@ -1172,6 +1220,7 @@ pub fn import_bundle<R: tauri::Runtime>(
             restart_required: true,
             desktop_registered: None,
             desktop_registration_error: None,
+            thread_title: Some(thread_title),
         })
     })
 }
@@ -1347,7 +1396,18 @@ pub fn import_bundles<R: tauri::Runtime>(
         let codex_home = db::with_conn(app, |conn| {
             settings::resolve_codex_home(conn).map(|(path, _)| path)
         })?;
-        let registrations = crate::app_server::register_threads(&codex_home, &imported_ids);
+        let titles: std::collections::HashMap<String, String> = out_items
+            .iter()
+            .filter(|item| item.result.status == "ok")
+            .filter_map(|item| {
+                item.result
+                    .thread_title
+                    .clone()
+                    .map(|title| (item.result.effective_session_id.clone(), title))
+            })
+            .collect();
+        let registrations =
+            crate::app_server::register_threads(&codex_home, &imported_ids, &titles);
         for item in &mut out_items {
             if item.result.status != "ok" {
                 continue;
@@ -1437,6 +1497,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
             name: params.name.clone(),
+            thread_title: None,
             note: params.note.clone(),
             session_id: source_session_id.clone(),
             created_at: created_at.clone(),
@@ -1542,6 +1603,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
                     restart_required: false,
                     desktop_registered: None,
                     desktop_registration_error: None,
+                    thread_title: None,
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1665,6 +1727,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
             restart_required: true,
             desktop_registered: None,
             desktop_registration_error: None,
+            thread_title: None,
         })
     })
 }
@@ -1744,6 +1807,9 @@ pub fn change_session_id<R: tauri::Runtime>(
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
             name: params.name.clone(),
+            thread_title: session_index::read_title_map(&codex_home)
+                .get(&params.session_id)
+                .cloned(),
             note: params.note.clone(),
             session_id: new_id.clone(),
             created_at: created_at.clone(),

@@ -83,6 +83,7 @@ fn stop_child(child: &mut Child) {
 pub fn register_threads(
     codex_home: &Path,
     thread_ids: &[String],
+    titles: &HashMap<String, String>,
 ) -> HashMap<String, Result<(), String>> {
     let mut results = HashMap::new();
     if thread_ids.is_empty() {
@@ -158,6 +159,7 @@ pub fn register_threads(
         }
     } else {
         for (index, id) in thread_ids.iter().enumerate() {
+            let title = titles.get(id).map(String::as_str).unwrap_or("");
             let request_id = index as u64 + 2;
             let result = send(
                 &mut stdin,
@@ -170,7 +172,21 @@ pub fn register_threads(
                     }
                 }),
             )
-            .and_then(|_| wait_for_response(&receiver, request_id, RESUME_TIMEOUT));
+            .and_then(|_| wait_for_response(&receiver, request_id, RESUME_TIMEOUT))
+            .and_then(|_| {
+                let name_request_id = request_id + thread_ids.len() as u64;
+                send(
+                    &mut stdin,
+                    json!({
+                        "method": "thread/name/set",
+                        "id": name_request_id,
+                        "params": { "threadId": id, "name": title }
+                    }),
+                )
+                .and_then(|_| {
+                    wait_for_response(&receiver, name_request_id, Duration::from_secs(15))
+                })
+            });
             results.insert(id.clone(), result);
         }
     }
