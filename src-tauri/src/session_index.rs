@@ -6,14 +6,15 @@
 //! 不会出现（`codex resume <id>` 仍可用）。
 //!
 //! 这里只做**追加**：
-//! - 已存在同 id 的记录则跳过，不覆盖、不删除任何已有行；
+//! - 新会话按 id 去重；更新标题追加新记录，读取时以最后一条为准；
+//! - 不截断或替换索引文件，避免覆盖 Codex 并发追加的记录；
 //! - 天然满足"B 机独有会话原样保留"的要求。
 
 use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -60,6 +61,11 @@ pub fn append_session_index(
         return Ok(false);
     }
 
+    append_entry(&index_path, id, thread_name)?;
+    Ok(true)
+}
+
+fn append_entry(index_path: &Path, id: &str, thread_name: &str) -> Result<(), String> {
     let entry = IndexEntry {
         id: id.to_string(),
         thread_name: thread_name.to_string(),
@@ -68,24 +74,32 @@ pub fn append_session_index(
     };
     let line = serde_json::to_string(&entry).map_err(|e| format!("serialize index entry: {e}"))?;
 
-    // 若索引文件已存在但最后一行没有以换行结尾（很常见），直接 append 会把新记录
-    // 拼到最后一行尾部，形成一条无法解析的 JSON，既损坏原有最后一行，也会让后续的
-    // 去重检测漏掉新写入的 id。这里先读出末尾字节，必要时补一个换行。
-    let need_leading_newline = fs::read(&index_path)
-        .map(|bytes| matches!(bytes.last(), Some(last) if *last != b'\n'))
-        .unwrap_or(false);
-
     let mut f = fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
-        .open(&index_path)
+        .open(index_path)
         .map_err(|e| format!("open session_index for append: {e}"))?;
-    if need_leading_newline {
-        f.write_all(b"\n")
-            .map_err(|e| format!("separate previous session_index line: {e}"))?;
+    let len = f
+        .metadata()
+        .map_err(|e| format!("stat session_index: {e}"))?
+        .len();
+    let mut record = String::new();
+    if len > 0 {
+        let mut last = [0];
+        f.seek(SeekFrom::End(-1))
+            .map_err(|e| format!("seek session_index: {e}"))?;
+        f.read_exact(&mut last)
+            .map_err(|e| format!("read session_index tail: {e}"))?;
+        if last[0] != b'\n' {
+            record.push('\n');
+        }
     }
-    writeln!(f, "{line}").map_err(|e| format!("append session_index: {e}"))?;
-    Ok(true)
+    record.push_str(&line);
+    record.push('\n');
+    // 一次提交完整记录，使用追加模式而非先读取再覆盖；重复 id 由读取端处理。
+    f.write_all(record.as_bytes())
+        .map_err(|e| format!("append session_index: {e}"))
 }
 
 pub fn upsert_session_title(
@@ -94,49 +108,30 @@ pub fn upsert_session_title(
     thread_name: &str,
 ) -> Result<bool, String> {
     let index_path = codex_home.join("session_index.jsonl");
-    let mut lines: Vec<String> = if index_path.exists() {
-        fs::read_to_string(&index_path)
-            .map_err(|e| format!("read session_index: {e}"))?
-            .lines()
-            .map(ToOwned::to_owned)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let mut found = false;
-    let mut changed = false;
-    for line in &mut lines {
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if value.pointer("/id").and_then(|v| v.as_str()) != Some(id) {
-            continue;
+    let mut latest_title = None;
+    match fs::File::open(&index_path) {
+        Ok(file) => {
+            for line in BufReader::new(file).lines() {
+                let line = line.map_err(|e| format!("read session_index: {e}"))?;
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if value.get("id").and_then(|v| v.as_str()) == Some(id) {
+                    latest_title = value
+                        .get("thread_name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
+            }
         }
-        found = true;
-        if value.pointer("/thread_name").and_then(|v| v.as_str()) != Some(thread_name) {
-            value["thread_name"] = serde_json::Value::String(thread_name.to_string());
-            *line = serde_json::to_string(&value)
-                .map_err(|e| format!("serialize session_index entry: {e}"))?;
-            changed = true;
-        }
-        break;
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("open session_index: {e}")),
     }
-    if !found {
-        let entry = IndexEntry {
-            id: id.to_string(),
-            thread_name: thread_name.to_string(),
-            updated_at: crate::bundle::now_rfc3339_utc()?,
-        };
-        lines.push(
-            serde_json::to_string(&entry).map_err(|e| format!("serialize index entry: {e}"))?,
-        );
-        changed = true;
+    if latest_title.as_deref() == Some(thread_name) {
+        return Ok(false);
     }
-    if changed {
-        fs::write(&index_path, format!("{}\n", lines.join("\n")))
-            .map_err(|e| format!("write session_index: {e}"))?;
-    }
-    Ok(changed)
+    append_entry(&index_path, id, thread_name)?;
+    Ok(true)
 }
 
 /// 读取整个 session_index.jsonl，建立 `id -> thread_name（标题）` 映射。
@@ -179,6 +174,73 @@ mod tests {
 
     fn temp_home(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("codexrelay-si-{}-{}", tag, uuid::Uuid::now_v7()))
+    }
+
+    #[test]
+    fn title_updates_append_and_compare_the_latest_record() {
+        let home = temp_home("title");
+        fs::create_dir_all(&home).unwrap();
+        let idx = home.join("session_index.jsonl");
+        let original = concat!(
+            "{\"id\":\"s1\",\"thread_name\":\"first\",\"extra\":1}\n",
+            "{\"id\":\"s1\",\"thread_name\":\"second\"}\n",
+            "{\"id\":\"other\",\"thread_name\":\"keep\"}"
+        );
+        fs::write(&idx, original).unwrap();
+        assert!(upsert_session_title(&home, "s1", "first").unwrap());
+        let updated = fs::read_to_string(&idx).unwrap();
+        assert!(
+            updated.starts_with(original),
+            "existing bytes must never be rewritten"
+        );
+        assert_eq!(updated.lines().count(), 4);
+        assert_eq!(read_title_map(&home)["s1"], "first");
+        assert!(!upsert_session_title(&home, "s1", "first").unwrap());
+        assert_eq!(fs::read_to_string(&idx).unwrap(), updated);
+        assert!(upsert_session_title(&home, "new", "new title").unwrap());
+        assert_eq!(read_title_map(&home)["other"], "keep");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn concurrent_append_writer_keeps_all_records() {
+        let home = temp_home("concurrent");
+        fs::create_dir_all(&home).unwrap();
+        let idx = home.join("session_index.jsonl");
+        let original = "{\"id\":\"original\",\"thread_name\":\"keep\"}\n";
+        fs::write(&idx, original).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writer_path = idx.clone();
+        let writer = std::thread::spawn(move || {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(writer_path)
+                .unwrap();
+            writer_barrier.wait();
+            for i in 0..100 {
+                let record = format!("{{\"id\":\"external-{i}\",\"thread_name\":\"external\"}}\n");
+                file.write_all(record.as_bytes()).unwrap();
+                std::thread::yield_now();
+            }
+        });
+        barrier.wait();
+        for i in 0..100 {
+            upsert_session_title(&home, &format!("import-{i}"), "imported").unwrap();
+        }
+        writer.join().unwrap();
+        let text = fs::read_to_string(&idx).unwrap();
+        assert!(text.starts_with(original));
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        let titles = read_title_map(&home);
+        assert_eq!(titles.len(), 201);
+        for i in 0..100 {
+            assert_eq!(titles[&format!("external-{i}")], "external");
+            assert_eq!(titles[&format!("import-{i}")], "imported");
+        }
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

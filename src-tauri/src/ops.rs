@@ -1033,9 +1033,11 @@ pub fn import_bundle<R: tauri::Runtime>(
                 });
             }
             ConflictStrategy::Overwrite => {
-                // If conflict, backup local existing into vault for safety.
+                // 路径重绑即使源内容相同也会修改本机文件，必须先备份。
                 if let Some(local_path) = &local_existing_path {
-                    if local_existing_sha.as_deref() != Some(&manifest.rollout.sha256) {
+                    if !rewrites.is_empty()
+                        || local_existing_sha.as_deref() != Some(&manifest.rollout.sha256)
+                    {
                         let local_backup = transfer_dir.join("local_before_rollout.jsonl");
                         vault::copy_file(local_path, &local_backup)?;
                     }
@@ -1056,6 +1058,7 @@ pub fn import_bundle<R: tauri::Runtime>(
 
                 if local_existing_path.is_some()
                     && local_existing_sha.as_deref() == Some(&manifest.rollout.sha256)
+                    && rewrites.is_empty()
                 {
                     // Same content already exists locally; still record the import, but do not rewrite the file.
                 } else {
@@ -1075,7 +1078,9 @@ pub fn import_bundle<R: tauri::Runtime>(
                             &manifest.session_id,
                             &rewrites,
                         )?;
-                        vault::copy_file(&rewritten_tmp, &target)?;
+                        (computed_sha, computed_size) =
+                            vault::copy_file_with_sha256(&rewritten_tmp, &target)?;
+                        vault_rollout_rel = "rollout_rewritten.jsonl".to_string();
                     }
                 }
                 local_written_path = Some(target);
@@ -2357,6 +2362,159 @@ mod tests {
         let _ = std::fs::remove_dir_all(&app_data_dir);
         let _ = std::fs::remove_dir_all(&codex_home_src);
         let _ = std::fs::remove_dir_all(&codex_home_dst);
+    }
+
+    #[test]
+    fn reimport_same_content_applies_rewrites_and_preserves_backup_and_history() {
+        let _guard = env_lock();
+        for strategy in [ConflictStrategy::Recommended, ConflictStrategy::Overwrite] {
+            let root = temp_dir("reimport-rebind");
+            let app_data = root.join("appdata");
+            let source = root.join("source");
+            let destination = root.join("destination");
+            let project = root.join("project");
+            fs::create_dir_all(project.join("child")).unwrap();
+            let _app_data = set_env_var("CODEXRELAY_APP_DATA_DIR", &app_data);
+            let _source_home = set_env_var("CODEX_HOME", &source);
+            let sid = "019d0000-5555-7777-8888-000000000005";
+            let src = write_rollout(&source, sid, "keep history");
+            let text = fs::read_to_string(&src)
+                .unwrap()
+                .replace("/tmp/proj", r"C:\\work\\proj\\child");
+            fs::write(&src, &text).unwrap();
+            let app = tauri::test::mock_app();
+            let handle = app.handle();
+            let exported = export_session(
+                handle,
+                ExportParams {
+                    session_id: sid.into(),
+                    name: "export".into(),
+                    note: None,
+                    include_shell_snapshot: false,
+                },
+            )
+            .unwrap();
+            let _destination_home = set_env_var("CODEX_HOME", &destination);
+            let params = || ImportParams {
+                bundle_path: exported.bundle_path.clone(),
+                name: "import".into(),
+                note: None,
+                strategy: strategy.clone(),
+                path_rewrites: None,
+                trust_project_paths: false,
+            };
+            let first = import_bundle(handle, params()).unwrap();
+            let target = PathBuf::from(first.local_rollout_path.unwrap());
+            assert_eq!(fs::read_to_string(&target).unwrap(), text);
+
+            let unchanged = import_bundle(handle, params()).unwrap();
+            assert!(!Path::new(&unchanged.vault_dir)
+                .join("local_before_rollout.jsonl")
+                .exists());
+            let mut rebound_params = params();
+            rebound_params.path_rewrites = Some(vec![PathRewrite {
+                from: r"C:\work\proj".into(),
+                to: project.to_string_lossy().into_owned(),
+            }]);
+            rebound_params.trust_project_paths = true;
+            let rebound = import_bundle(handle, rebound_params).unwrap();
+            assert_eq!(rebound.effective_session_id, sid);
+            assert_eq!(
+                rebound.project_cwd.as_deref(),
+                project.join("child").to_str()
+            );
+            assert_eq!(rebound.project_trusted, Some(true));
+            assert_eq!(
+                fs::read_to_string(
+                    Path::new(&rebound.vault_dir).join("local_before_rollout.jsonl")
+                )
+                .unwrap(),
+                text
+            );
+            let effective = fs::read(&target).unwrap();
+            let record =
+                db::with_conn(handle, |conn| db::transfers_get(conn, &rebound.transfer_id))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                record.rollout_sha256.unwrap(),
+                hash::sha256_file_hex(&target).unwrap()
+            );
+            assert_eq!(record.rollout_size, Some(effective.len() as i64));
+            let archived =
+                Path::new(&record.vault_dir).join(record.vault_rollout_rel_path.unwrap());
+            assert_eq!(fs::read(&archived).unwrap(), effective);
+
+            fs::write(&target, &text).unwrap();
+            let restored = restore_from_history(
+                handle,
+                RestoreFromHistoryParams {
+                    record_id: rebound.transfer_id,
+                    name: "restore rebound".into(),
+                    note: None,
+                    strategy: ConflictStrategy::Overwrite,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                restored.project_cwd.as_deref(),
+                project.join("child").to_str()
+            );
+            assert_eq!(fs::read(&target).unwrap(), effective);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_rebind_input_does_not_overwrite_local_session() {
+        let _guard = env_lock();
+        let root = temp_dir("invalid-rebind");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let _app_data = set_env_var("CODEXRELAY_APP_DATA_DIR", &root.join("appdata"));
+        let _source_home = set_env_var("CODEX_HOME", &source);
+        let sid = "019d0000-6666-7777-8888-000000000006";
+        let src = write_rollout(&source, sid, "source");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(src)
+            .unwrap()
+            .write_all(b"not json\n")
+            .unwrap();
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let exported = export_session(
+            handle,
+            ExportParams {
+                session_id: sid.into(),
+                name: "invalid input".into(),
+                note: None,
+                include_shell_snapshot: false,
+            },
+        )
+        .unwrap();
+        let target = write_rollout(&destination, sid, "local must survive");
+        let before = fs::read(&target).unwrap();
+        let _destination_home = set_env_var("CODEX_HOME", &destination);
+        let result = import_bundle(
+            handle,
+            ImportParams {
+                bundle_path: exported.bundle_path,
+                name: "rebind".into(),
+                note: None,
+                strategy: ConflictStrategy::Overwrite,
+                path_rewrites: Some(vec![PathRewrite {
+                    from: "/tmp/proj".into(),
+                    to: "/new/proj".into(),
+                }]),
+                trust_project_paths: true,
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), before);
+        assert!(!destination.join("session_index.jsonl").exists());
+        assert!(!destination.join("config.toml").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

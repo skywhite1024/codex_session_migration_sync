@@ -9,7 +9,7 @@
 //! - 只做"前缀替换"，不碰路径中间的相对片段；
 //! - 带边界保护：`C:\proj` 不会误伤 `C:\proj-other`（要求命中后紧跟 `/`、`\`、
 //!   `"`、空格、行尾或扩展名点）；
-//! - 同时处理 JSON 原始形式和 JSON 转义形式（Windows 反斜杠在 JSON 里是 `\\`）；
+//! - 先解析 JSON，再改写字符串值，由 serde_json 负责完整转义；
 //! - 与"改 session id"合并在一次流式遍历里完成，避免两次读大文件。
 
 use serde::Deserialize;
@@ -70,29 +70,68 @@ fn is_absolute_any_platform(p: &str) -> bool {
     p.starts_with('/') || p.starts_with('\\')
 }
 
-/// 预编译后的映射，同时保留原始形式与 JSON 转义形式。
+/// Windows 源路径用于匹配时统一分隔符和 ASCII 大小写，输出保留目标路径拼写。
 struct CompiledRewrite {
-    /// 原始形式（用户输入原样）。
-    from_raw: String,
-    /// JSON 文本形式：`\` 写成 `\\`。
-    from_json: String,
-    to_raw: String,
-    to_json: String,
+    from: String,
+    to: String,
+    windows_source: bool,
+    separator: char,
 }
 
-fn escape_json_path(p: &str) -> String {
-    p.replace('\\', "\\\\")
+fn is_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || path.starts_with("\\\\")
+        || path.starts_with("//")
 }
 
 impl CompiledRewrite {
     fn compile(rw: &PathRewrite) -> Result<Self, String> {
         rw.validate()?;
+        let windows_source = is_windows_path(&rw.from);
+        let mut from = rw.from.clone();
+        if windows_source {
+            from = from.replace('\\', "/");
+            from.make_ascii_lowercase();
+        }
+        if from != "/" {
+            from = from.trim_end_matches('/').to_string();
+        }
+        if from.is_empty() {
+            return Err("路径映射的旧路径不能仅包含重复分隔符".to_string());
+        }
         Ok(Self {
-            from_raw: rw.from.trim_end_matches(&['/', '\\']).to_string(),
-            from_json: escape_json_path(rw.from.trim_end_matches(&['/', '\\'])),
-            to_raw: rw.to.clone(),
-            to_json: escape_json_path(&rw.to),
+            from,
+            to: rw.to.clone(),
+            windows_source,
+            separator: if is_windows_path(&rw.to) && rw.to.contains('\\') {
+                '\\'
+            } else {
+                '/'
+            },
         })
+    }
+
+    fn replace_path(&self, tail: &str) -> String {
+        let tail = if self.windows_source {
+            tail.replace('\\', "/")
+        } else {
+            tail.to_string()
+        };
+        let tail = if self.separator == '\\' {
+            tail.replace('/', "\\")
+        } else {
+            tail
+        };
+        if tail.is_empty() {
+            return self.to.clone();
+        }
+        let target = self.to.trim_end_matches(self.separator);
+        if self.from.ends_with('/') && !tail.starts_with(self.separator) {
+            format!("{target}{}{tail}", self.separator)
+        } else {
+            format!("{target}{tail}")
+        }
     }
 }
 
@@ -102,54 +141,85 @@ fn boundary_ok(rest: &str) -> bool {
     let Some(next) = rest.chars().next() else {
         return true; // 行尾
     };
-    matches!(next, '/' | '\\' | '"' | ' ' | '\t' | '\r' | '.' | ')')
+    next.is_whitespace() || matches!(next, '/' | '\\' | '"' | '\'' | '.' | ')' | ']' | ',' | ';')
 }
 
-/// 在单行文本上应用所有映射。`line` 是整行 JSON 文本。
-fn apply_line(line: &str, rules: &[CompiledRewrite]) -> String {
+/// 正文只转换命中的路径片段，不能把命令或其他路径中的反斜杠一起改掉。
+fn rewrite_text(text: &str, rules: &[CompiledRewrite], path_field: bool) -> String {
     if rules.is_empty() {
-        return line.to_string();
+        return text.to_string();
     }
-    let mut out = String::with_capacity(line.len() + 64);
-    let mut rest = line;
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut rest = text;
     loop {
-        // 找所有规则在 rest 中的最早命中位置。
-        let mut best: Option<(usize, &CompiledRewrite, bool)> = None;
+        let mut best: Option<(usize, &CompiledRewrite)> = None;
         for r in rules {
-            for (idx, is_json) in rest
-                .find(&r.from_json)
-                .map(|i| (i, true))
-                .into_iter()
-                .chain(rest.find(&r.from_raw).map(|i| (i, false)))
-            {
-                // 边界检查：命中片段之后必须是合法边界。
-                let after = &rest[idx
-                    + (if is_json {
-                        r.from_json.len()
-                    } else {
-                        r.from_raw.len()
-                    })..];
-                if !boundary_ok(after) {
+            let mut searchable = rest.to_string();
+            if r.windows_source {
+                searchable = searchable.replace('\\', "/");
+                searchable.make_ascii_lowercase();
+            }
+            for (idx, _) in searchable.match_indices(&r.from) {
+                let before_ok = idx == 0
+                    || rest[..idx].ends_with(|c: char| {
+                        c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '{' | '=' | ':')
+                    });
+                if !before_ok
+                    || (!r.from.ends_with('/') && !boundary_ok(&rest[idx + r.from.len()..]))
+                {
                     continue;
                 }
                 match best {
-                    Some((bi, _, _)) if bi <= idx => {}
-                    _ => best = Some((idx, r, is_json)),
+                    Some((bi, br)) if bi < idx || (bi == idx && br.from.len() >= r.from.len()) => {}
+                    _ => best = Some((idx, r)),
                 }
+                break;
             }
         }
-        let Some((idx, r, is_json)) = best else {
+        let Some((idx, r)) = best else {
             out.push_str(rest);
             return out;
         };
         out.push_str(&rest[..idx]);
-        let consumed = if is_json {
-            r.from_json.len()
+        let tail = &rest[idx + r.from.len()..];
+        let tail_len = if path_field && idx == 0 && out.is_empty() {
+            tail.len()
+        } else if let Some(quote @ ('"' | '\'')) = rest[..idx].chars().next_back() {
+            tail.find(quote).unwrap_or(tail.len())
         } else {
-            r.from_raw.len()
+            tail.find(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '"' | '\'' | ')' | ']' | '}' | ',' | ';' | '&' | '|' | '<' | '>' | '`'
+                    )
+            })
+            .unwrap_or(tail.len())
         };
-        out.push_str(if is_json { &r.to_json } else { &r.to_raw });
-        rest = &rest[idx + consumed..];
+        out.push_str(&r.replace_path(&tail[..tail_len]));
+        rest = &tail[tail_len..];
+    }
+}
+
+fn rewrite_value(value: &mut serde_json::Value, rules: &[CompiledRewrite], path_field: bool) {
+    match value {
+        serde_json::Value::String(text) => *text = rewrite_text(text, rules, path_field),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_value(item, rules, false);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                // 明确的路径字段允许空格、引号等合法文件名字符。
+                rewrite_value(
+                    value,
+                    rules,
+                    matches!(key.as_str(), "cwd" | "path" | "workdir" | "file_path"),
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -195,12 +265,10 @@ pub fn rewrite_rollout(
             continue;
         }
 
-        // 路径重写是纯文本级操作，不需要先 parse JSON；但改 session id 需要结构化。
-        let rewritten_text = apply_line(&line, &rules);
-
-        let final_text = if let Some(new_id) = new_session_id {
-            let mut v: serde_json::Value = serde_json::from_str(&rewritten_text)
-                .map_err(|e| format!("parse rollout json line: {e}"))?;
+        let mut v: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| format!("parse rollout json line: {e}"))?;
+        rewrite_value(&mut v, &rules, false);
+        if let Some(new_id) = new_session_id {
             let is_meta = v
                 .get("type")
                 .and_then(|x| x.as_str())
@@ -216,10 +284,9 @@ pub fn rewrite_rollout(
                     *p = serde_json::Value::String(new_id.to_string());
                 }
             }
-            serde_json::to_string(&v).map_err(|e| format!("serialize rollout: {e}"))?
-        } else {
-            rewritten_text
-        };
+        }
+        let final_text =
+            serde_json::to_string(&v).map_err(|e| format!("serialize rollout: {e}"))?;
 
         writeln!(writer, "{final_text}").map_err(|e| format!("write rollout: {e}"))?;
     }
@@ -233,6 +300,166 @@ pub fn rewrite_rollout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply_line(line: &str, rules: &[CompiledRewrite]) -> String {
+        let mut value = serde_json::from_str(line).unwrap();
+        rewrite_value(&mut value, rules, false);
+        serde_json::to_string(&value).unwrap()
+    }
+
+    fn rewrite_fixture(value: serde_json::Value, from: &str, to: &str) -> serde_json::Value {
+        let dir = std::env::temp_dir().join(format!("codexrelay-rebind-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("in.jsonl");
+        let dst = dir.join("out.jsonl");
+        fs::write(&src, format!("{}\n", value)).unwrap();
+        rewrite_rollout(
+            &src,
+            &dst,
+            None,
+            "old",
+            &[PathRewrite {
+                from: from.into(),
+                to: to.into(),
+            }],
+        )
+        .unwrap();
+        let result = serde_json::from_str(&fs::read_to_string(&dst).unwrap()).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+        result
+    }
+
+    #[test]
+    fn windows_to_posix_rewrites_child_paths_but_not_unrelated_backslashes() {
+        let result = rewrite_fixture(
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "cwd": "C:\\work\\proj\\folder name\\subdir",
+                    "text": "cat C:\\work\\proj\\src\\main.rs && echo \\keep\\this",
+                    "paths": ["C:\\work\\proj\\src\\main.rs"]
+                }
+            }),
+            "C:\\work\\proj",
+            "/home/dex/proj",
+        );
+        assert_eq!(
+            result["payload"]["cwd"],
+            "/home/dex/proj/folder name/subdir"
+        );
+        assert_eq!(
+            result["payload"]["text"],
+            "cat /home/dex/proj/src/main.rs && echo \\keep\\this"
+        );
+        assert_eq!(result["payload"]["paths"][0], "/home/dex/proj/src/main.rs");
+    }
+
+    #[test]
+    fn special_characters_in_posix_target_remain_valid_json() {
+        let target = "/home/dex/a\"b\\literal\tname";
+        let result = rewrite_fixture(
+            serde_json::json!({"cwd": "C:\\work\\proj\\child", "text": "open C:\\work\\proj"}),
+            "C:\\work\\proj",
+            target,
+        );
+        assert_eq!(result["cwd"], format!("{target}/child"));
+        assert_eq!(result["text"], format!("open {target}"));
+    }
+
+    #[test]
+    fn posix_to_windows_rewrites_child_separators() {
+        let result = rewrite_fixture(
+            serde_json::json!({"cwd": "/home/alex/proj/sub/dir"}),
+            "/home/alex/proj",
+            "D:\\work\\proj",
+        );
+        assert_eq!(result["cwd"], "D:\\work\\proj\\sub\\dir");
+    }
+
+    #[test]
+    fn quoted_history_paths_keep_spaces_and_unrelated_escapes() {
+        let result = rewrite_fixture(
+            serde_json::json!({"text": "cat \"C:\\work\\proj\\folder name\\a.txt\" && echo \\keep"}),
+            r"C:\work\proj",
+            "/srv/proj",
+        );
+        assert_eq!(
+            result["text"],
+            "cat \"/srv/proj/folder name/a.txt\" && echo \\keep"
+        );
+    }
+
+    #[test]
+    fn matching_handles_case_separators_boundaries_and_overlapping_rules() {
+        let rules = [
+            PathRewrite {
+                from: r"C:\work\proj\".into(),
+                to: "/srv/proj".into(),
+            },
+            PathRewrite {
+                from: r"C:\work\proj\special".into(),
+                to: "/srv/special".into(),
+            },
+        ]
+        .iter()
+        .map(|r| CompiledRewrite::compile(r).unwrap())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            rewrite_text(r"c:/WORK/PROJ-other C:/Work/Proj/src", &rules, false),
+            "c:/WORK/PROJ-other /srv/proj/src"
+        );
+        assert_eq!(
+            rewrite_text(r"C:\work\proj\special\child", &rules, true),
+            "/srv/special/child"
+        );
+        let result = rewrite_fixture(
+            serde_json::json!({"cwd":"/Users/Proj/child"}),
+            "/Users/proj",
+            "/srv/proj",
+        );
+        assert_eq!(result["cwd"], "/Users/Proj/child");
+    }
+
+    #[test]
+    fn posix_root_and_literal_backslashes_are_preserved() {
+        let result = rewrite_fixture(
+            serde_json::json!({"cwd": "/old/a\\b/child"}),
+            "/old",
+            "/new",
+        );
+        assert_eq!(result["cwd"], r"/new/a\b/child");
+        let result = rewrite_fixture(serde_json::json!({"cwd": "/home/dex"}), "/", "/mnt");
+        assert_eq!(result["cwd"], "/mnt/home/dex");
+        let result = rewrite_fixture(serde_json::json!({"cwd": "/old/child"}), "/old", "/");
+        assert_eq!(result["cwd"], "/child");
+        assert!(CompiledRewrite::compile(&PathRewrite {
+            from: "//".into(),
+            to: "/mnt".into(),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn invalid_json_is_rejected_even_without_an_id_change() {
+        let dir = std::env::temp_dir().join(format!("codexrelay-invalid-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("in.jsonl");
+        let dst = dir.join("out.jsonl");
+        fs::write(&src, "{\"cwd\":\"/old\"}\nnot json\n").unwrap();
+        let err = rewrite_rollout(
+            &src,
+            &dst,
+            None,
+            "old",
+            &[PathRewrite {
+                from: "/old".into(),
+                to: "/new".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("parse rollout json line"));
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn rejects_empty_and_relative_from() {

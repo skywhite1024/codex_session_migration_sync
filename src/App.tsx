@@ -7,6 +7,7 @@ import "./App.css";
 import * as api from "./lib/api";
 import { formatBytes, formatRfc3339, formatTimeMs, shortSha } from "./lib/format";
 import { isTauriRuntime } from "./lib/runtime";
+import { isWithinDirectory } from "./lib/pathFilter";
 import {
   WEB_DEMO_HISTORY,
   WEB_DEMO_PREVIEW,
@@ -768,15 +769,8 @@ function App() {
   const filteredSessions = useMemo(() => {
     const q = sessionsFilter.trim().toLowerCase();
     const root = sessionsCwdFilter.trim();
-    // 归一化：统一分隔符、去尾部斜杠、转小写，兼容 Windows 盘符大小写与 / \ 混用。
-    const norm = (x: string) => x.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-    const nRoot = norm(root);
     return sessions.filter((sess) => {
-      if (nRoot) {
-        const c = norm(sess.cwd ?? "");
-        // 边界保护：cwd 等于 root，或 root 之后紧跟路径分隔符才算位于该文件夹下。
-        if (c !== nRoot && !c.startsWith(nRoot + "/")) return false;
-      }
+      if (!isWithinDirectory(sess.cwd, root)) return false;
       if (!q) return true;
       return (
         sess.id.toLowerCase().includes(q) ||
