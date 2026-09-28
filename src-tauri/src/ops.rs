@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{BufRead, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -262,6 +262,29 @@ pub fn register_imported_thread<R: tauri::Runtime>(
                 Some("Codex app-server did not return a registration result".to_string());
         }
     }
+    persist_registration(app, result)?;
+    Ok(())
+}
+
+fn persist_registration<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    result: &mut ImportResult,
+) -> AppResult<()> {
+    if result.desktop_registered == Some(false) {
+        result.status = "partial".into();
+    }
+    db::with_conn(app, |conn| -> Result<(), String> {
+        conn.execute(
+            "UPDATE transfers SET status = ?1, error_message = ?2 WHERE id = ?3",
+            rusqlite::params![
+                result.status,
+                result.desktop_registration_error,
+                result.transfer_id
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -314,7 +337,7 @@ pub fn export_session<R: tauri::Runtime>(
             })?;
 
         let meta = codex::read_rollout_meta(&codex_home, &rollout_src)?;
-        let thread_title = session_index::read_title_map(&codex_home)
+        let thread_title = session_index::read_thread_titles(&codex_home)
             .get(&params.session_id)
             .cloned();
         if meta.id != params.session_id {
@@ -330,7 +353,11 @@ pub fn export_session<R: tauri::Runtime>(
         let include_shell_snapshot = params.include_shell_snapshot && shell_src.exists();
 
         let rollout_vault_path = transfer_dir.join("rollout.jsonl");
-        let (sha256, file_size) = vault::copy_file_with_sha256(&rollout_src, &rollout_vault_path)?;
+        crate::history::export_standalone(&codex_home, &rollout_src, &rollout_vault_path)?;
+        let sha256 = hash::sha256_file_hex(&rollout_vault_path)?;
+        let file_size = fs::metadata(&rollout_vault_path)
+            .map_err(|e| e.to_string())?
+            .len() as i64;
 
         let (shell_vault_path, shell_snapshot_info) = if include_shell_snapshot {
             let p = transfer_dir.join("shell_snapshot.sh");
@@ -952,6 +979,8 @@ pub fn import_bundle<R: tauri::Runtime>(
         }
 
         // Check local conflict.
+        // Never resolve imported dependencies against unrelated/stale local parents.
+        crate::history::validate_standalone(&extracted.rollout.path)?;
         let local_existing_path =
             codex::find_rollout_by_session_id(&codex_home, &manifest.session_id)?;
         let mut local_existing_sha: Option<String> = None;
@@ -1056,6 +1085,7 @@ pub fn import_bundle<R: tauri::Runtime>(
 
                 if local_existing_path.is_some()
                     && local_existing_sha.as_deref() == Some(&manifest.rollout.sha256)
+                    && rewrites.is_empty()
                 {
                     // Same content already exists locally; still record the import, but do not rewrite the file.
                 } else {
@@ -1171,6 +1201,7 @@ pub fn import_bundle<R: tauri::Runtime>(
         let thread_title = manifest
             .thread_title
             .clone()
+            .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| params.name.clone());
         let indexed =
             session_index::upsert_session_title(&codex_home, &effective_session_id, &thread_title)
@@ -1385,8 +1416,8 @@ pub fn import_bundles<R: tauri::Runtime>(
     }
 
     // Codex Desktop maintains an app-server thread catalog in addition to
-    // session_index.jsonl. Resume only the metadata for every successful import;
-    // this does not start a turn or append anything to the conversation.
+    // session_index.jsonl. Validate/resume each imported rollout without starting
+    // a turn; excludeTurns only limits the response payload.
     let imported_ids: Vec<String> = out_items
         .iter()
         .filter(|item| item.result.status == "ok")
@@ -1427,11 +1458,19 @@ pub fn import_bundles<R: tauri::Runtime>(
                         Some("Codex app-server 未返回该会话的登记结果".to_string());
                 }
             }
+            persist_registration(app, &mut item.result)?;
         }
     }
 
-    let imported = out_items.len();
-    let failed = out_errors.len();
+    let imported = out_items
+        .iter()
+        .filter(|item| item.result.status == "ok")
+        .count();
+    let failed = out_errors.len()
+        + out_items
+            .iter()
+            .filter(|item| item.result.status == "partial")
+            .count();
     Ok(ImportBundlesResult {
         requested_paths: paths.len(),
         imported,
@@ -1482,7 +1521,19 @@ pub fn restore_from_history<R: tauri::Runtime>(
         let rollout_vault_path = transfer_dir.join("rollout.jsonl");
         vault::copy_file(&src_rollout, &rollout_vault_path)?;
 
+        crate::history::validate_standalone(&rollout_vault_path)?;
         let source_session_id = codex::read_rollout_session_id(&rollout_vault_path)?;
+        let thread_title = ["manifest_effective.json", "manifest.json"]
+            .into_iter()
+            .filter_map(|name| bundle::read_manifest_json(&src_vault_dir.join(name)).ok())
+            .filter(|m| m.session_id == source_session_id)
+            .find_map(|m| m.thread_title.filter(|t| !t.trim().is_empty()))
+            .or_else(|| {
+                session_index::read_thread_titles(&codex_home)
+                    .get(&source_session_id)
+                    .cloned()
+            })
+            .unwrap_or_else(|| params.name.clone());
 
         let mut computed_size = i64::try_from(
             fs::metadata(&rollout_vault_path)
@@ -1497,7 +1548,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
             name: params.name.clone(),
-            thread_title: None,
+            thread_title: Some(thread_title.clone()),
             note: params.note.clone(),
             session_id: source_session_id.clone(),
             created_at: created_at.clone(),
@@ -1603,7 +1654,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
                     restart_required: false,
                     desktop_registered: None,
                     desktop_registration_error: None,
-                    thread_title: None,
+                    thread_title: Some(thread_title.clone()),
                 });
             }
             ConflictStrategy::Overwrite => {
@@ -1697,7 +1748,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
 
         // best-effort：见 import_bundle 处的说明。
         let indexed =
-            session_index::append_session_index(&codex_home, &effective_session_id, &params.name)
+            session_index::upsert_session_title(&codex_home, &effective_session_id, &thread_title)
                 .unwrap_or_else(|e| {
                     eprintln!("session_index append failed (non-fatal): {e}");
                     false
@@ -1727,7 +1778,7 @@ pub fn restore_from_history<R: tauri::Runtime>(
             restart_required: true,
             desktop_registered: None,
             desktop_registration_error: None,
-            thread_title: None,
+            thread_title: Some(thread_title.clone()),
         })
     })
 }
@@ -1778,7 +1829,7 @@ pub fn change_session_id<R: tauri::Runtime>(
         }
 
         let original_vault = transfer_dir.join("rollout.jsonl");
-        vault::copy_file(&rollout_src, &original_vault)?;
+        crate::history::export_standalone(&codex_home, &rollout_src, &original_vault)?;
 
         let rewritten_vault = transfer_dir.join("rollout_effective.jsonl");
         rewrite_session_id(
@@ -1807,7 +1858,7 @@ pub fn change_session_id<R: tauri::Runtime>(
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
             name: params.name.clone(),
-            thread_title: session_index::read_title_map(&codex_home)
+            thread_title: session_index::read_thread_titles(&codex_home)
                 .get(&params.session_id)
                 .cloned(),
             note: params.note.clone(),
@@ -2156,49 +2207,7 @@ fn is_uuid_hyphenated_at(bytes: &[u8], i: usize) -> bool {
 }
 
 fn rewrite_session_id(src: &Path, old_id: &str, new_id: &str, dst: &Path) -> Result<(), String> {
-    let input = fs::File::open(src).map_err(|e| format!("open rollout: {e}"))?;
-    let reader = std::io::BufReader::new(input);
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-    }
-    let output = fs::File::create(dst).map_err(|e| format!("create rewritten rollout: {e}"))?;
-    let mut writer = std::io::BufWriter::new(output);
-
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("read rollout line: {e}"))?;
-        if line.trim().is_empty() {
-            writeln!(writer).map_err(|e| format!("write rollout: {e}"))?;
-            continue;
-        }
-
-        let mut v: serde_json::Value =
-            serde_json::from_str(&line).map_err(|e| format!("parse rollout json line: {e}"))?;
-
-        let should_rewrite = v
-            .get("type")
-            .and_then(|x| x.as_str())
-            .map(|t| t == "session_meta")
-            .unwrap_or(false)
-            && v.pointer("/payload/id")
-                .and_then(|x| x.as_str())
-                .map(|id| id == old_id)
-                .unwrap_or(false);
-
-        if should_rewrite {
-            if let Some(p) = v.pointer_mut("/payload/id") {
-                *p = serde_json::Value::String(new_id.to_string());
-            }
-        }
-
-        let out_line =
-            serde_json::to_string(&v).map_err(|e| format!("serialize rollout json line: {e}"))?;
-        writeln!(writer, "{out_line}").map_err(|e| format!("write rollout: {e}"))?;
-    }
-
-    writer
-        .flush()
-        .map_err(|e| format!("flush rewritten rollout: {e}"))?;
-    Ok(())
+    path_rewrite::rewrite_rollout(src, dst, Some(new_id), old_id, &[])
 }
 
 #[cfg(test)]
@@ -2293,6 +2302,150 @@ mod tests {
     }
 
     #[test]
+    fn paginated_fork_export_import_and_registration_failure_roundtrip() {
+        let _guard = env_lock();
+        let app_data_dir = temp_dir("lineage-app");
+        let _app_data = set_env_var("CODEXRELAY_APP_DATA_DIR", &app_data_dir);
+        let source = temp_dir("lineage-source");
+        let _home = set_env_var("CODEX_HOME", &source);
+        let parent_id = "019d0000-1111-7777-8888-000000000011";
+        let child_id = "019d0000-1111-7777-8888-000000000012";
+        let parent = write_rollout(&source, parent_id, "parent history");
+        let child = write_rollout(&source, child_id, "child history");
+        for (p, id, start) in [(&parent, parent_id, 0u64), (&child, child_id, 2u64)] {
+            let mut records: Vec<serde_json::Value> = fs::read_to_string(p)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            for (i, r) in records.iter_mut().enumerate() {
+                r["ordinal"] = (start + i as u64).into();
+            }
+            records[0]["payload"]["session_id"] = id.into();
+            records[0]["payload"]["history_mode"] = "paginated".into();
+            if start > 0 {
+                records[0]["payload"]["history_base"] = serde_json::json!({
+                    "thread_id":parent_id,"end_ordinal_exclusive":2,
+                    "end_byte_offset":fs::metadata(&parent).unwrap().len()});
+            }
+            fs::write(
+                p,
+                records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(source.join("archived_sessions")).unwrap();
+        fs::rename(
+            &parent,
+            source
+                .join("archived_sessions")
+                .join(parent.file_name().unwrap()),
+        )
+        .unwrap();
+        let app = tauri::test::mock_app();
+        let exported = export_session(
+            app.handle(),
+            ExportParams {
+                session_id: child_id.into(),
+                name: "fork".into(),
+                note: None,
+                include_shell_snapshot: false,
+            },
+        )
+        .unwrap();
+        let dest = temp_dir("lineage-destination");
+        let _dest_home = set_env_var("CODEX_HOME", &dest);
+        let mut imported = import_bundle(
+            app.handle(),
+            ImportParams {
+                bundle_path: exported.bundle_path,
+                name: "fork".into(),
+                note: None,
+                strategy: ConflictStrategy::ImportAsNew,
+                path_rewrites: Some(vec![path_rewrite::PathRewrite {
+                    from: "/tmp/proj".into(),
+                    to: "C:\\new\\课程".into(),
+                }]),
+                trust_project_paths: false,
+            },
+        )
+        .unwrap();
+        let content = fs::read_to_string(imported.local_rollout_path.as_ref().unwrap()).unwrap();
+        assert!(content.contains("parent history") && content.contains("child history"));
+        assert!(!content.contains("history_base"));
+        let meta: serde_json::Value =
+            serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert_eq!(meta["payload"]["id"], imported.effective_session_id);
+        assert_eq!(meta["payload"]["session_id"], imported.effective_session_id);
+        assert_eq!(meta["payload"]["cwd"], "C:\\new\\课程");
+        imported.desktop_registered = Some(false);
+        imported.desktop_registration_error = Some("fixture registration failure".into());
+        persist_registration(app.handle(), &mut imported).unwrap();
+        assert_eq!(imported.status, "partial");
+        let saved = db::with_conn(app.handle(), |conn| {
+            db::transfers_get(conn, &imported.transfer_id)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(saved.status, "partial");
+        assert_eq!(
+            saved.error_message.as_deref(),
+            Some("fixture registration failure")
+        );
+        let _ = fs::remove_dir_all(app_data_dir);
+        let _ = fs::remove_dir_all(source);
+        let _ = fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn incomplete_bundle_is_rejected_before_touching_existing_session() {
+        let _guard = env_lock();
+        let app_data = temp_dir("incomplete-app");
+        let _app_data = set_env_var("CODEXRELAY_APP_DATA_DIR", &app_data);
+        let home = temp_dir("incomplete-home");
+        let _home = set_env_var("CODEX_HOME", &home);
+        let sid = "019d0000-1111-7777-8888-000000000013";
+        let path = write_rollout(&home, sid, "preserve existing");
+        let original = fs::read(&path).unwrap();
+        let app = tauri::test::mock_app();
+        let mut exported = export_session(
+            app.handle(),
+            ExportParams {
+                session_id: sid.into(),
+                name: "incomplete".into(),
+                note: None,
+                include_shell_snapshot: false,
+            },
+        )
+        .unwrap();
+        let broken = home.join("broken.jsonl");
+        let text = serde_json::json!({"type":"session_meta","ordinal":4,"payload":{
+            "id":sid,"history_base":{"thread_id":"missing","end_ordinal_exclusive":4,"end_byte_offset":500}}});
+        fs::write(&broken, format!("{text}\n")).unwrap();
+        exported.manifest.rollout.sha256 = hash::sha256_file_hex(&broken).unwrap();
+        exported.manifest.rollout.size = fs::metadata(&broken).unwrap().len() as i64;
+        let manifest = home.join("manifest.json");
+        bundle::write_manifest_json(&manifest, &exported.manifest).unwrap();
+        let zip = home.join("incomplete.zip");
+        bundle::write_bundle_zip(&zip, &manifest, &broken, None).unwrap();
+        let result = import_bundle(
+            app.handle(),
+            ImportParams {
+                bundle_path: zip.to_string_lossy().into_owned(),
+                name: "bad".into(),
+                note: None,
+                strategy: ConflictStrategy::Overwrite,
+                path_rewrites: None,
+                trust_project_paths: false,
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(path).unwrap(), original);
+        let _ = fs::remove_dir_all(app_data);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn export_then_import_roundtrip_overwrite() {
         let _guard = env_lock();
 
@@ -2304,6 +2457,17 @@ mod tests {
 
         let sid = "019d0000-1111-7777-8888-000000000001";
         let _rollout_src = write_rollout(&codex_home_src, sid, "hello from src");
+        let catalog = rusqlite::Connection::open(codex_home_src.join("state_5.sqlite")).unwrap();
+        catalog
+            .execute("CREATE TABLE threads(id TEXT,name TEXT,title TEXT)", [])
+            .unwrap();
+        catalog
+            .execute(
+                "INSERT INTO threads VALUES (?1,?2,?3)",
+                rusqlite::params![sid, "课程原始标题", "a long first message"],
+            )
+            .unwrap();
+        drop(catalog);
 
         // Optional shell snapshot (export should include only when both checkbox and file exist).
         let shell_dir = codex_home_src.join("shell_snapshots");
@@ -2327,6 +2491,10 @@ mod tests {
         assert!(Path::new(&exported.bundle_path).exists());
         assert_eq!(exported.manifest.session_id, sid);
         assert_eq!(exported.resume_cmd, format!("codex resume {sid}"));
+        assert_eq!(
+            exported.manifest.thread_title.as_deref(),
+            Some("课程原始标题")
+        );
 
         let codex_home_dst = temp_dir("codexhome-dst");
         let _codex_home2 = set_env_var("CODEX_HOME", &codex_home_dst);
@@ -2346,6 +2514,22 @@ mod tests {
 
         assert_eq!(imported.status, "ok");
         assert_eq!(imported.effective_session_id, sid);
+        assert_eq!(imported.thread_title.as_deref(), Some("课程原始标题"));
+        let restored = restore_from_history(
+            handle,
+            RestoreFromHistoryParams {
+                record_id: exported.transfer_id.clone(),
+                name: "unrelated transfer label".into(),
+                note: None,
+                strategy: ConflictStrategy::ImportAsNew,
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.thread_title.as_deref(), Some("课程原始标题"));
+        assert_eq!(
+            session_index::read_title_map(&codex_home_dst)[&restored.effective_session_id],
+            "课程原始标题"
+        );
         let local_path = PathBuf::from(imported.local_rollout_path.unwrap());
         assert!(local_path.exists());
         assert_eq!(

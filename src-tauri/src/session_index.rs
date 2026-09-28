@@ -6,7 +6,7 @@
 //! 不会出现（`codex resume <id>` 仍可用）。
 //!
 //! 这里只做**追加**：
-//! - 已存在同 id 的记录则跳过，不覆盖、不删除任何已有行；
+//! - 更新名称时追加新记录，以最后一条为准，不覆盖、不删除任何已有行；
 //! - 天然满足"B 机独有会话原样保留"的要求。
 
 use serde::Serialize;
@@ -25,6 +25,7 @@ pub struct IndexEntry {
 }
 
 /// 检查 session_index.jsonl 中是否已存在给定 id 的记录。
+#[cfg(test)]
 fn has_id(index_path: &Path, id: &str) -> Result<bool, String> {
     if !index_path.exists() {
         return Ok(false);
@@ -33,7 +34,7 @@ fn has_id(index_path: &Path, id: &str) -> Result<bool, String> {
     let reader = BufReader::new(f);
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read session_index: {e}"))?;
-        let line = line.trim();
+        let line = line.trim().trim_start_matches('\u{feff}');
         if line.is_empty() {
             continue;
         }
@@ -49,6 +50,7 @@ fn has_id(index_path: &Path, id: &str) -> Result<bool, String> {
 
 /// 追加一条会话索引。返回值：是否实际写入了新行。
 /// 若文件不存在则创建。
+#[cfg(test)]
 pub fn append_session_index(
     codex_home: &Path,
     id: &str,
@@ -93,50 +95,87 @@ pub fn upsert_session_title(
     id: &str,
     thread_name: &str,
 ) -> Result<bool, String> {
+    if read_title_map(codex_home).get(id).map(String::as_str) == Some(thread_name) {
+        return Ok(false);
+    }
+    // Last entry wins. Append without overwriting concurrent Codex index writes.
     let index_path = codex_home.join("session_index.jsonl");
-    let mut lines: Vec<String> = if index_path.exists() {
-        fs::read_to_string(&index_path)
-            .map_err(|e| format!("read session_index: {e}"))?
-            .lines()
-            .map(ToOwned::to_owned)
-            .collect()
-    } else {
-        Vec::new()
+    let previous = match fs::read(&index_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.to_string()),
     };
-    let mut found = false;
-    let mut changed = false;
-    for line in &mut lines {
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+    let separator = if matches!(previous.last(), Some(b) if *b != b'\n') {
+        "\n"
+    } else {
+        ""
+    };
+    let entry = IndexEntry {
+        id: id.into(),
+        thread_name: thread_name.into(),
+        updated_at: crate::bundle::now_rfc3339_utc()?,
+    };
+    let text = format!(
+        "{}{}\n",
+        separator,
+        serde_json::to_string(&entry).map_err(|e| e.to_string())?
+    );
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(index_path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(|e| format!("append session title: {e}"))?;
+    Ok(true)
+}
+
+/// Explicit Desktop names override the index; first-message titles are a last resort.
+pub fn read_thread_titles(codex_home: &Path) -> HashMap<String, String> {
+    let mut titles = read_title_map(codex_home);
+    let Ok(entries) = fs::read_dir(codex_home) else {
+        return titles;
+    };
+    let mut dbs: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let version = name
+                .strip_prefix("state_")?
+                .strip_suffix(".sqlite")?
+                .parse::<u32>()
+                .ok()?;
+            Some((version, e.path()))
+        })
+        .collect();
+    dbs.sort_by_key(|(v, _)| std::cmp::Reverse(*v));
+    for (_, path) in dbs {
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
             continue;
         };
-        if value.pointer("/id").and_then(|v| v.as_str()) != Some(id) {
+        let Ok(mut query) = conn.prepare("SELECT id, name, title FROM threads") else {
             continue;
-        }
-        found = true;
-        if value.pointer("/thread_name").and_then(|v| v.as_str()) != Some(thread_name) {
-            value["thread_name"] = serde_json::Value::String(thread_name.to_string());
-            *line = serde_json::to_string(&value)
-                .map_err(|e| format!("serialize session_index entry: {e}"))?;
-            changed = true;
+        };
+        let Ok(rows) = query.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        }) else {
+            continue;
+        };
+        for (id, name, title) in rows.flatten() {
+            if let Some(name) = name.filter(|s| !s.trim().is_empty()) {
+                titles.insert(id, name);
+            } else if !title.trim().is_empty() {
+                titles.entry(id).or_insert(title);
+            }
         }
         break;
     }
-    if !found {
-        let entry = IndexEntry {
-            id: id.to_string(),
-            thread_name: thread_name.to_string(),
-            updated_at: crate::bundle::now_rfc3339_utc()?,
-        };
-        lines.push(
-            serde_json::to_string(&entry).map_err(|e| format!("serialize index entry: {e}"))?,
-        );
-        changed = true;
-    }
-    if changed {
-        fs::write(&index_path, format!("{}\n", lines.join("\n")))
-            .map_err(|e| format!("write session_index: {e}"))?;
-    }
-    Ok(changed)
+    titles
 }
 
 /// 读取整个 session_index.jsonl，建立 `id -> thread_name（标题）` 映射。
@@ -153,7 +192,7 @@ pub fn read_title_map(codex_home: &Path) -> HashMap<String, String> {
     };
     let reader = BufReader::new(f);
     for line in reader.lines().flatten() {
-        let line = line.trim();
+        let line = line.trim().trim_start_matches('\u{feff}');
         if line.is_empty() {
             continue;
         }
@@ -211,6 +250,38 @@ mod tests {
         assert_eq!(lines.len(), 2);
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn newest_duplicate_title_wins_without_rewriting_existing_bytes() {
+        let home = temp_home("duplicates");
+        fs::create_dir_all(&home).unwrap();
+        let path = home.join("session_index.jsonl");
+        let before = "\u{feff}{\"id\":\"a\",\"thread_name\":\"first\"}\n{\"id\":\"a\",\"thread_name\":\"stale\"}\nmalformed";
+        fs::write(&path, before).unwrap();
+        assert!(upsert_session_title(&home, "a", "原始会话标题").unwrap());
+        assert_eq!(read_title_map(&home)["a"], "原始会话标题");
+        assert!(fs::read_to_string(&path).unwrap().starts_with(before));
+        let bytes = fs::read(&path).unwrap();
+        assert!(!upsert_session_title(&home, "a", "原始会话标题").unwrap());
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn explicit_catalog_name_wins_over_first_message_and_stale_index() {
+        let home = temp_home("catalog");
+        fs::create_dir_all(&home).unwrap();
+        upsert_session_title(&home, "a", "outdated").unwrap();
+        upsert_session_title(&home, "b", "indexed title").unwrap();
+        let conn = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+        conn.execute_batch("CREATE TABLE threads(id TEXT,name TEXT,title TEXT); INSERT INTO threads VALUES ('a','chosen title','first message'),('b',NULL,'long first message'),('c',NULL,'only available title');").unwrap();
+        let titles = read_thread_titles(&home);
+        assert_eq!(titles["a"], "chosen title");
+        assert_eq!(titles["b"], "indexed title");
+        assert_eq!(titles["c"], "only available title");
+        drop(conn);
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

@@ -234,6 +234,8 @@ function statusZh(status: string): string {
       return "已取消";
     case "failed":
       return "失败";
+    case "partial":
+      return "文件已导入，恢复登记失败";
     default:
       return status || "-";
   }
@@ -365,6 +367,26 @@ function App() {
     useState<ConflictStrategy>("overwrite");
   const [importPathRewrites, setImportPathRewrites] =
     useState<PathRewrite[]>([]);
+  const [importPathSuggestions, setImportPathSuggestions] = useState<api.ImportPathSuggestion[]>([]);
+  const [importPathDetectionInfo, setImportPathDetectionInfo] = useState("");
+  const [importPathDetecting, setImportPathDetecting] = useState(false);
+  useEffect(() => {
+    let canceled = false;
+    setImportPathSuggestions([]);
+    setImportPathRewrites([]);
+    setImportPathDetectionInfo("");
+    if (!isTauri || !importBundlePaths.length) { setImportPathDetecting(false); return; }
+    setImportPathDetecting(true);
+    api.detectImportPaths(importBundlePaths).then((rows) => {
+      if (canceled) return;
+      setImportPathSuggestions(rows);
+      setImportPathRewrites(rows.map((r) => ({ from: r.from, to: r.suggested ?? "" })));
+      setImportPathDetectionInfo(`已识别 ${rows.length} 个源目录；${rows.filter((r) => !r.suggested).length} 个需要选择本机目录。请核对后导入。`);
+    }).catch((e) => {
+      if (!canceled) setImportPathDetectionInfo(`自动识别失败，可手动添加映射：${toErrorMessage(e)}`);
+    }).finally(() => { if (!canceled) setImportPathDetecting(false); });
+    return () => { canceled = true; };
+  }, [importBundlePaths]);
   const [importTrustProjects, setImportTrustProjects] = useState(true);
   const [importBatchResult, setImportBatchResult] =
     useState<ImportBundlesResult | null>(null);
@@ -1233,6 +1255,7 @@ function App() {
   }
 
   async function handleImport() {
+    if (importPathDetecting) return;
     setError(null);
     setImportBatchResult(null);
     setBusyAction("import");
@@ -1250,7 +1273,7 @@ function App() {
         return;
       }
       const activeRewrites = importPathRewrites
-        .filter((rw) => rw.from.trim() && rw.to.trim())
+        .filter((rw) => rw.from.trim() && rw.to.trim() && rw.from.trim() !== rw.to.trim())
         .map((rw) => ({ from: rw.from.trim(), to: rw.to.trim() }));
       const r = await api.importBundles({
         bundle_paths: importBundlePaths,
@@ -2958,9 +2981,9 @@ function App() {
 	                <div className="field">
 	                  <div className="label">路径重绑（跨设备可选）</div>
 	                  <div className="hint muted small">
-	                    两台机器项目路径不一致时，把 A 机旧路径前缀替换为 B 机新路径。
-	                    留空则不改动。
+                      自动读取导出包中的旧目录，并匹配本机已有项目。同名项目有多个时，请从候选中选择或浏览文件夹；留空则保留原路径。
 	                  </div>
+                      <div className="hint muted small">{importPathDetecting ? "正在识别导入路径…" : importPathDetectionInfo}</div>
 	                  {importPathRewrites.map((rw, i) => (
 	                    <div
 	                      key={i}
@@ -2976,6 +2999,7 @@ function App() {
 	                        style={{ flex: "1 1 200px" }}
 	                        placeholder="A 机旧路径，如 C:\Users\alex\proj"
 	                        value={rw.from}
+	                        disabled={importPathDetecting}
 	                        onChange={(e) => updatePathRewrite(i, "from", e.target.value)}
 	                      />
 	                      <span className="muted">→</span>
@@ -2983,8 +3007,15 @@ function App() {
 	                        style={{ flex: "1 1 200px" }}
 	                        placeholder="B 机新路径"
 	                        value={rw.to}
+	                        disabled={importPathDetecting}
 	                        onChange={(e) => updatePathRewrite(i, "to", e.target.value)}
 	                      />
+                          {!!importPathSuggestions.find((r) => r.from === rw.from)?.candidates.length && (
+                            <select aria-label={`选择本机项目 ${i + 1}`} value="" onChange={(e) => updatePathRewrite(i, "to", e.target.value)}>
+                              <option value="">选择本机已有项目…</option>
+                              {importPathSuggestions.find((r) => r.from === rw.from)?.candidates.map((p) => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                          )}
 	                      <button
 	                        type="button"
 	                        onClick={() => pickRewriteTarget(i)}
@@ -3023,7 +3054,7 @@ function App() {
 	              <div className="row">
 	                <button
 	                  type="button"
-	                  disabled={!isTauri || busy || !importName.trim()}
+	                  disabled={!isTauri || busy || importPathDetecting || !importName.trim()}
 	                  onClick={handleImport}
 	                >
 	                  {busyAction === "import" ? "导入中..." : "导入"}
@@ -3053,7 +3084,7 @@ function App() {
 	                  </pre>
 	                </div>
 	              ) : null}
-	              {importBatchResult.imported > 0 ? (
+	              {importBatchResult.items.length > 0 ? (
 	                <div className="hint">
 	                  {importBatchResult.items.some(
 	                    (it) => it.result.desktop_registration_error,

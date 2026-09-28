@@ -136,7 +136,7 @@ pub fn list_sessions(codex_home: &Path, limit: usize) -> Vec<SessionSummary> {
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
     // 读一次会话索引，拿到 id -> 标题（thread_name）映射。
-    let title_map = crate::session_index::read_title_map(codex_home);
+    let title_map = crate::session_index::read_thread_titles(codex_home);
 
     let mut out: Vec<SessionSummary> = Vec::new();
     for (_t, path) in candidates {
@@ -155,18 +155,62 @@ pub fn find_rollout_by_session_id(
     codex_home: &Path,
     session_id: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let sessions_root = codex_home.join("sessions");
-    if !sessions_root.exists() {
-        return Ok(None);
+    // A thread can have multiple segments with the same ID. Prefer the active
+    // catalog path; file mtimes can change when an older segment is archived/copied.
+    if let Ok(entries) = fs::read_dir(codex_home) {
+        let mut databases: Vec<_> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let version = name
+                    .strip_prefix("state_")?
+                    .strip_suffix(".sqlite")?
+                    .parse::<u32>()
+                    .ok()?;
+                Some((version, e.path()))
+            })
+            .collect();
+        databases.sort_by_key(|(version, _)| std::cmp::Reverse(*version));
+        for (_, database) in databases {
+            let Ok(conn) = rusqlite::Connection::open_with_flags(
+                database,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) else {
+                continue;
+            };
+            let path: Result<String, _> = conn.query_row(
+                "SELECT rollout_path FROM threads WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            );
+            if let Ok(path) = path {
+                let path = PathBuf::from(path);
+                let inside_home = path
+                    .canonicalize()
+                    .ok()
+                    .zip(codex_home.canonicalize().ok())
+                    .map(|(p, root)| p.starts_with(root))
+                    .unwrap_or(false);
+                if inside_home && read_rollout_session_id(&path).ok().as_deref() == Some(session_id)
+                {
+                    return Ok(Some(path));
+                }
+            }
+        }
     }
-
     let mut best: Option<(Option<i64>, PathBuf)> = None;
 
-    for entry in walkdir::WalkDir::new(&sessions_root)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
+    for entry in [
+        codex_home.join("sessions"),
+        codex_home.join("archived_sessions"),
+    ]
+    .into_iter()
+    .flat_map(|root| {
+        walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+    }) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -176,6 +220,11 @@ pub fn find_rollout_by_session_id(
             continue;
         }
         if !file_name.contains(session_id) {
+            continue;
+        }
+        // Continuation filenames can contain both the session ID and a segment ID.
+        // A substring match alone can overwrite a different conversation.
+        if read_rollout_session_id(path).ok().as_deref() != Some(session_id) {
             continue;
         }
 
@@ -366,4 +415,53 @@ fn path_to_slash_string(path: &Path) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn catalog_selects_active_segment_and_filename_alias_is_not_an_identity() {
+        let home = std::env::temp_dir().join(format!("codex-catalog-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        fs::create_dir_all(home.join("archived_sessions")).unwrap();
+        let active = home.join("sessions/rollout-active-thread-a.jsonl");
+        let older = home.join("archived_sessions/rollout-old-thread-a.jsonl");
+        let alias = home.join("sessions/rollout-thread-b_thread-a.jsonl");
+        for (path, id) in [
+            (&active, "thread-a"),
+            (&older, "thread-a"),
+            (&alias, "thread-b"),
+        ] {
+            fs::write(
+                path,
+                format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"),
+            )
+            .unwrap();
+        }
+        let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+        db.execute(
+            "CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO threads VALUES (?1,?2)",
+            rusqlite::params!["thread-a", active.to_string_lossy()],
+        )
+        .unwrap();
+        assert_eq!(
+            find_rollout_by_session_id(&home, "thread-a").unwrap(),
+            Some(active.clone())
+        );
+        drop(db);
+        fs::remove_file(active).unwrap();
+        // A stale catalog entry must fall back to the real archived identity,
+        // never to a filename containing the ID of an unrelated segment.
+        assert_eq!(
+            find_rollout_by_session_id(&home, "thread-a").unwrap(),
+            Some(older)
+        );
+        let _ = fs::remove_dir_all(home);
+    }
 }

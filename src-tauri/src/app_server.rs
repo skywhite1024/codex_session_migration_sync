@@ -1,14 +1,14 @@
 //! Register imported rollouts with Codex app-server.
 //!
 //! `session_index.jsonl` is enough for older CLI pickers, but Codex Desktop keeps
-//! an additional thread catalog. A metadata-only `thread/resume` makes an imported
-//! rollout known to that catalog without starting a turn or changing the conversation.
+//! an additional thread catalog. `thread/resume` validates and registers a rollout
+//! without starting a turn. `excludeTurns` reduces the response, not the work done.
 
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -18,17 +18,73 @@ use std::{
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESUME_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn codex_program() -> String {
+fn installed_program(local: &Path, roaming: &Path) -> Option<PathBuf> {
+    let mut candidates = vec![local.join("Programs/OpenAI/Codex/bin/codex.exe")];
+    // Desktop uses versioned directories, and GUI processes may inherit an old PATH.
+    if let Ok(entries) = std::fs::read_dir(local.join("OpenAI/Codex/bin")) {
+        let mut versions: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path().join("codex.exe"))
+            .filter(|p| p.is_file())
+            .collect();
+        versions.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        candidates.extend(versions.into_iter().rev());
+    }
+    let npm = roaming.join("npm/node_modules/@openai");
+    for arch in ["x86_64", "aarch64"] {
+        let triple = format!("{arch}-pc-windows-msvc");
+        for package in [
+            "codex".to_string(),
+            format!(
+                "codex-win32-{}",
+                if arch == "x86_64" { "x64" } else { "arm64" }
+            ),
+        ] {
+            candidates.push(
+                npm.join(&package)
+                    .join("vendor")
+                    .join(&triple)
+                    .join("codex/codex.exe"),
+            );
+            candidates.push(
+                npm.join("codex/node_modules/@openai")
+                    .join(package)
+                    .join("vendor")
+                    .join(&triple)
+                    .join("codex/codex.exe"),
+            );
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn codex_program() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("CODEX_CLI_PATH") {
         if !path.trim().is_empty() && Path::new(&path).is_file() {
-            return path;
+            return Ok(PathBuf::from(path));
+        }
+        return Err("CODEX_CLI_PATH 未指向有效文件，请选择 codex.exe 的完整路径".into());
+    }
+    let name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let file = dir.join(name);
+            if file.is_file() {
+                return Ok(file);
+            }
         }
     }
     if cfg!(windows) {
-        "codex.exe".to_string()
-    } else {
-        "codex".to_string()
+        if let (Some(local), Some(roaming)) = (
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("APPDATA"),
+        ) {
+            if let Some(file) = installed_program(Path::new(&local), Path::new(&roaming)) {
+                return Ok(file);
+            }
+        }
     }
+    Err("未找到 Codex CLI。请安装 CLI，或将 CODEX_CLI_PATH 设置为可执行文件的完整路径；已检查 PATH 和常见安装目录。".into())
 }
 
 fn send(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
@@ -90,7 +146,22 @@ pub fn register_threads(
         return results;
     }
 
-    let mut child = match Command::new(codex_program())
+    let program = match codex_program() {
+        Ok(program) => program,
+        Err(error) => {
+            return thread_ids
+                .iter()
+                .map(|id| (id.clone(), Err(error.clone())))
+                .collect()
+        }
+    };
+    let mut command = Command::new(&program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = match command
         .args(["app-server", "--stdio"])
         .env("CODEX_HOME", codex_home)
         .stdin(Stdio::piped())
@@ -100,7 +171,10 @@ pub fn register_threads(
     {
         Ok(child) => child,
         Err(error) => {
-            let message = format!("无法启动 Codex app-server：{error}");
+            let message = format!(
+                "无法启动 Codex app-server（{}）：{error}",
+                program.display()
+            );
             for id in thread_ids {
                 results.insert(id.clone(), Err(message.clone()));
             }
@@ -146,7 +220,8 @@ pub fn register_threads(
                 "clientInfo": {
                     "name": "codex-session-migration-sync",
                     "version": env!("CARGO_PKG_VERSION")
-                }
+                },
+                "capabilities": { "experimentalApi": true }
             }
         }),
     )
@@ -200,6 +275,34 @@ pub fn register_threads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated CODEXRELAY_TEST_HOME with migration-test-fixture.json"]
+    fn register_isolated_fixture() {
+        let home =
+            PathBuf::from(std::env::var_os("CODEXRELAY_TEST_HOME").expect("isolated test home"));
+        let ids: Vec<String> = serde_json::from_str(
+            &std::fs::read_to_string(home.join("migration-test-fixture.json"))
+                .expect("fixture marker"),
+        )
+        .unwrap();
+        assert!(!ids.is_empty());
+        let titles: HashMap<_, _> = ids
+            .iter()
+            .map(|id| (id.clone(), "Migration regression fixture".into()))
+            .collect();
+        let mut requests = vec!["00000000-0000-0000-0000-000000000000".into()];
+        requests.extend(ids.clone());
+        let results = register_threads(&home, &requests, &titles);
+        assert!(results[&requests[0]].is_err());
+        for id in &ids {
+            assert_eq!(results[id], Ok(()), "{id}");
+        }
+        println!(
+            "Registered {} fixture threads after a missing-thread error",
+            ids.len()
+        );
+    }
 
     #[test]
     fn matches_only_the_expected_response() {

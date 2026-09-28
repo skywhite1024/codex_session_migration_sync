@@ -61,6 +61,11 @@ export async function inspectBundle(
   return invoke<InspectBundleResult>("inspect_bundle", { bundlePath: bundle_path });
 }
 
+export type ImportPathSuggestion = { from: string; suggested: string | null; candidates: string[] };
+export async function detectImportPaths(bundlePaths: string[]): Promise<ImportPathSuggestion[]> {
+  return invoke("detect_import_paths", { bundlePaths });
+}
+
 export async function inspectBatchZip(
   bundle_path: string,
 ): Promise<InspectBatchZipResult> {

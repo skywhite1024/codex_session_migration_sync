@@ -166,6 +166,7 @@ pub fn rewrite_rollout(
     old_session_id: &str,
     path_rewrites: &[PathRewrite],
 ) -> Result<(), String> {
+    crate::history::validate_standalone(src)?;
     let rules: Vec<CompiledRewrite> = path_rewrites
         .iter()
         .map(CompiledRewrite::compile)
@@ -215,12 +216,18 @@ pub fn rewrite_rollout(
                 if let Some(p) = v.pointer_mut("/payload/id") {
                     *p = serde_json::Value::String(new_id.to_string());
                 }
+                if let Some(p) = v.pointer_mut("/payload/session_id") {
+                    *p = serde_json::Value::String(new_id.to_string());
+                }
             }
             serde_json::to_string(&v).map_err(|e| format!("serialize rollout: {e}"))?
         } else {
             rewritten_text
         };
 
+        // Rebinding alone must also reject invalid JSON, not only ID changes.
+        serde_json::from_str::<serde_json::Value>(&final_text)
+            .map_err(|e| format!("路径重绑产生无效 JSON：{e}"))?;
         writeln!(writer, "{final_text}").map_err(|e| format!("write rollout: {e}"))?;
     }
 
@@ -303,7 +310,7 @@ mod tests {
         std::fs::write(
             &src,
             concat!(
-                r#"{"type":"session_meta","payload":{"id":"old","cwd":"/Users/alex/proj","cli_version":"1.0"}}"#,
+                r#"{"type":"session_meta","payload":{"id":"old","session_id":"old","cwd":"/Users/alex/proj","cli_version":"1.0"}}"#,
                 "\n",
                 r#"{"type":"event","payload":{"path":"/Users/alex/proj/a.rs"}}"#,
                 "\n",
@@ -325,6 +332,7 @@ mod tests {
 
         let text = std::fs::read_to_string(&dst).unwrap();
         assert!(text.contains(r#""id":"new-id""#));
+        assert!(text.contains(r#""session_id":"new-id""#));
         assert!(text.contains(r#""cwd":"/srv/proj""#));
         assert!(text.contains(r#""/srv/proj/a.rs""#));
         assert!(!text.contains("/Users/alex"));

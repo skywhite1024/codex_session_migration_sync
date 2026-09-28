@@ -7,9 +7,11 @@ mod db;
 mod device;
 mod errors;
 mod hash;
+mod history;
 mod id_extract;
 mod ops;
 mod path_rewrite;
+mod path_detection;
 mod preview;
 mod session_index;
 mod settings;
@@ -75,6 +77,16 @@ async fn export_bundle(
     tauri::async_runtime::spawn_blocking(move || ops::export_session(&app, params))
         .await
         .map_err(|e| AppError::internal(format!("export task join error: {e}")))?
+}
+
+#[tauri::command]
+async fn detect_import_paths(app: tauri::AppHandle, bundle_paths: Vec<String>) -> AppResult<Vec<path_detection::Suggestion>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        db::with_conn(&app, |conn| -> AppResult<Vec<path_detection::Suggestion>> {
+            let (home, _) = settings::resolve_codex_home(conn)?;
+            path_detection::detect(&home, &bundle_paths).map_err(AppError::from)
+        })
+    }).await.map_err(|e| AppError::internal(format!("detect-paths task: {e}")))?
 }
 
 #[tauri::command]
@@ -146,9 +158,13 @@ async fn restore_from_history(
     app: tauri::AppHandle,
     params: ops::RestoreFromHistoryParams,
 ) -> AppResult<ops::ImportResult> {
-    tauri::async_runtime::spawn_blocking(move || ops::restore_from_history(&app, params))
-        .await
-        .map_err(|e| AppError::internal(format!("restore task join error: {e}")))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut result = ops::restore_from_history(&app, params)?;
+        ops::register_imported_thread(&app, &mut result)?;
+        Ok(result)
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("restore task join error: {e}")))?
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -422,6 +438,7 @@ pub fn run() {
             export_bundle,
             export_sessions,
             inspect_bundle,
+            detect_import_paths,
             inspect_batch_zip,
             import_bundle,
             import_bundles,
