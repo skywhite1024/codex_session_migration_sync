@@ -135,6 +135,18 @@ sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
 
 ## 快速开始
 
+### Linux 快速启动（依赖已安装）
+
+进入项目目录后运行：
+
+```bash
+bash "start.sh"
+```
+
+脚本会打开真实桌面 GUI，并自动查找 pnpm 和 Cargo；只调整启动进程的工具路径，不修改系统配置，也不自动安装依赖。启动后保持终端运行。
+
+### 首次安装与构建
+
 ```powershell
 # 1. 克隆后进入目录
 git clone <your-fork-url> codex_session_migration_sync

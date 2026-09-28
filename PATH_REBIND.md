@@ -6,7 +6,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `src-tauri/src/path_rewrite.rs` | 新增。路径重绑核心模块（规范化、边界保护、JSON 转义双形式匹配、流式改写 rollout，内含 5 个 Rust 单元测试） |
+| `src-tauri/src/path_rewrite.rs` | 路径重绑核心模块（结构化 JSON 改写、跨系统分隔符转换、边界保护、逐行处理 rollout，含 Rust 回归测试） |
 | `src-tauri/src/ops.rs` | `ImportParams` / `ImportBundlesParams` 增加可选字段 `path_rewrites`；Overwrite 与 ImportAsNew 两个写入分支都接入重写；`import_bundles` 透传 |
 | `src-tauri/src/lib.rs` | 注册 `mod path_rewrite;` |
 | `src/lib/types.ts` | 新增 `PathRewrite` 类型，两个导入参数类型同步加字段 |
@@ -28,7 +28,9 @@
 
 - 不传 / 传 `null`：行为与原版完全一致（向后兼容）。
 - 每条规则是"前缀替换"：rollout 第一行 `session_meta.payload.cwd` 和整份对话里出现的旧路径都会被重写。
-- Windows 路径直接写原样（`\`），模块内部自动同时处理 JSON 转义形式（`\\`）。
+- Windows 路径直接写原样（`\`），模块先解析 JSON，替换字符串值，再用 `serde_json` 完整转义；目标目录中的双引号、反斜杠等不会破坏 JSON。
+- Windows → Linux 会将命中路径的子目录分隔符转换为 `/`；POSIX 路径匹配保留大小写，Windows 源路径支持大小写与 `/`、`\` 混用。
+- `cwd`、`path`、`workdir`、`file_path` 按完整路径处理，正文按路径片段处理（支持引号内的空格），不全局替换其他文本的反斜杠。历史命令的 shell 语法不会自动转换。
 - `from` 必须是绝对路径；相对路径 / 空值会被拒绝。
 
 ### 边界保护（为什么不会误伤）
@@ -42,18 +44,20 @@
 
 ## 测试
 
-- Rust 侧：`path_rewrite.rs` 内置 5 个单元测试（空 from 拒绝、cwd 重写、撞名不误伤、POSIX 路径、端到端改 ID+cwd），在有 Rust 工具链的机器上跑：
+- Rust 侧覆盖 Windows/POSIX 子目录、特殊字符、边界、正文、非法 JSON 及端到端改 ID+cwd：
   ```
-  cargo test --manifest-path src-tauri/Cargo.toml path_rewrite
+  cargo test --locked --manifest-path "src-tauri/Cargo.toml" path_rewrite
   ```
-- 无 Rust 环境时的等价逻辑验证（本仓库根目录）：
+- 兼容入口直接调用上述 Rust 测试，不再使用可能与生产代码漂移的 JavaScript 复刻算法（需要 `cargo` 在 PATH 中，或设置 `CARGO` 为其完整路径）：
   ```
-  node verify_rewrite.cjs   # 9 个行为用例，全过
+  node "verify_rewrite.cjs"
+  node "verify_index.cjs"
   ```
-- 前端类型检查：`pnpm install && pnpm exec tsc --noEmit`（已通过）。
+- 完整检查：`pnpm check`；目录筛选回归与页面冒烟：`pnpm test:e2e`。
+- 重复导入相同原始包时，补填路径映射仍会执行重绑；修改前备份，历史记录保存重绑后的内容、大小与哈希，恢复时使用该版本。
 
 ## 未做的事（边界）
 
 - ~~前端 GUI 面板没加~~ **已完成**：导入页"导入选项"里新增「路径重绑（跨设备可选）」区块，可动态增删多条映射，新路径支持"选文件夹"按钮（调系统目录选择器）。留空即不重绑。
-- ~~Codex 会话索引不处理~~ **已完成**：实测本机 Codex 的会话列表索引是 `CODEX_HOME/session_index.jsonl`（每行 `{id, thread_name, updated_at}`）。导入/恢复成功后会往这个文件**追加一行**，按 id 去重、绝不删旧行，导入的会话重启 Codex 后直接出现在列表里。
+- ~~Codex 会话索引不处理~~ **已完成**：`CODEX_HOME/session_index.jsonl` 每行包含 `{id, thread_name, updated_at}`。新会话按 id 去重；标题变更追加新记录，读取时以最后一条为准，绝不截断重写旧索引。Desktop 登记仍由 app-server 完成，需要单独检查登记结果。
 - ~~shell_snapshot.sh 不导入~~ **已完成（保持安全默认）**：bundle 里带的 shell_snapshot.sh 仍只存档到 vault、不写回 CODEX_HOME（避免把 A 机环境变量/密钥带到 B 机）；导入结果现在会明确提示"随包携带、已存档未写回"。
