@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{AppError, AppResult};
 
 // Where releases are published.
-const UPSTREAM_REPO: &str = "Red-noblue/Codex_Relay";
+const UPSTREAM_REPO: &str = "skywhite1024/codex_session_migration_sync";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateCheckResult {

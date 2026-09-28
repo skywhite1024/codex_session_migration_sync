@@ -1,13 +1,14 @@
 {
   "name": "codexrelay",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:tauri": "vite --mode tauri",
     "build": "tsc && vite build",
     "build:tauri": "tsc && vite build --mode tauri",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "preview": "vite preview",
     "check": "pnpm build && cargo test -q --manifest-path src-tauri/Cargo.toml",
     "test:e2e": "pnpm -s build && playwright test",

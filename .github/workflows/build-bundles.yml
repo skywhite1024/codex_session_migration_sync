@@ -69,13 +69,27 @@ jobs:
         run: cargo test -q --manifest-path src-tauri/Cargo.toml --no-run
 
       - name: Build Bundles
+        if: matrix.os != 'windows-latest'
         run: pnpm tauri build
 
+      - name: Build Windows EXEs
+        if: matrix.os == 'windows-latest'
+        run: pnpm build:windows
+
       - name: Upload Bundles
+        if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: codexrelay-${{ matrix.os }}-bundles
           path: src-tauri/target/release/bundle/**/*
+          if-no-files-found: error
+
+      - name: Upload Windows EXEs
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexrelay-windows-latest-bundles
+          path: artifacts/windows/**/*
           if-no-files-found: error
 
   release:

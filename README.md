@@ -71,9 +71,19 @@
 
 ---
 
-## 环境要求
+## Windows 直接运行（无需开发环境）
 
-本项目是 **Tauri v2 桌面应用**，需要同时具备前端（Node/pnpm）和后端（Rust）两套工具链。
+使用 Windows x64 EXE，双击即可打开图形界面，无需通过 `pnpm tauri dev` 启动。
+提供直接运行版和安装版；沿用现有设置、会话和存档库。
+系统需有 WebView2，安装版会在缺少时联网安装。
+
+在构建电脑执行 `pnpm build:windows`，产物位于 `artifacts/windows/0.1.8/`。
+日常使用只需 EXE，不需要复制源码、`node_modules` 或 `target`。
+详细说明见 [Windows EXE 使用与打包](docs/WINDOWS_EXE.md)。
+
+## 源码开发环境要求
+
+本项目是 **Tauri v2 桌面应用**。以下工具链仅用于源码开发和构建，运行打包后的 EXE 不需要。
 
 | 依赖 | 版本要求 | 说明 |
 |---|---|---|
@@ -169,7 +179,8 @@ pnpm tauri build
 | `pnpm tauri dev` | **日常使用这个**：启动前端 + Rust 后端，弹出桌面窗口，支持热更新 |
 | `pnpm dev` | 只起前端网页（http://localhost:5273），**显示的是演示数据，读不到真实会话**，仅用于调界面 |
 | `pnpm build` | 类型检查 + 构建前端到 `dist/` |
-| `pnpm tauri build` | 构建各平台安装包（Windows: `.msi`/`.exe`，macOS: `.dmg`） |
+| `pnpm tauri build` | 构建当前平台安装包（Windows: NSIS `.exe`，macOS: `.dmg`） |
+| `pnpm build:windows` | 构建 Windows x64 直接运行版、安装版和 SHA256 校验文件 |
 | `pnpm check` | 前端构建 + `cargo test` |
 
 > 第一次 `pnpm tauri dev` 需要编译几百个 Rust crate，耗时数分钟到十几分钟；之后增量编译只需十几秒。
