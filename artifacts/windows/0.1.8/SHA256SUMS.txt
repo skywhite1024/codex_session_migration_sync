@@ -1,0 +1,2 @@
+e367147cee181890fa5dd284c13faa840d4af21f344163d6de2c969830589751  CodexRelay-0.1.8-windows-x64.exe
+bf75866fdf756fd6eb0dde8c4fdc06814f73b4c92a93f77767da455b4056fb5b  CodexRelay-0.1.8-windows-x64-setup.exe

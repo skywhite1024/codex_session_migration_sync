@@ -10,7 +10,15 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
-artifacts/
+artifacts/*
+!artifacts/windows/
+artifacts/windows/*
+!artifacts/windows/0.1.8/
+artifacts/windows/0.1.8/*
+!artifacts/windows/0.1.8/CodexRelay-0.1.8-windows-x64.exe
+!artifacts/windows/0.1.8/CodexRelay-0.1.8-windows-x64-setup.exe
+!artifacts/windows/0.1.8/SHA256SUMS.txt
+!artifacts/windows/0.1.8/README.md
 *.local
 src-tauri/target/
 

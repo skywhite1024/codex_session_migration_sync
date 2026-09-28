@@ -33,7 +33,14 @@ try {
     Copy-Item -LiteralPath $exe -Destination $portable -Force
     Copy-Item -LiteralPath $installer -Destination $setup -Force
     $sums = foreach ($file in @($portable, $setup)) {
-        $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        $stream = [IO.File]::OpenRead($file)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+            $stream.Dispose()
+        }
         "$hash  $([IO.Path]::GetFileName($file))"
     }
     $sums | Set-Content -LiteralPath (Join-Path $outputDir 'SHA256SUMS.txt') -Encoding ascii
